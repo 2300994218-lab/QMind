@@ -1,0 +1,139 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: quantmind-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-quantmind_root_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-quantmind}
+      MYSQL_USER: ${MYSQL_USER:-quantmind}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-quantmind123}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - quantmind-net
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: quantmind-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-quantmind}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-quantmind_mq_2026}
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - quantmind-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      network: host
+    container_name: quantmind-backend
+    environment:
+      SERVER_PORT: "8080"
+      GIN_MODE: release
+      DB_DRIVER: mysql
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${MYSQL_USER:-quantmind}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-quantmind123}
+      DB_NAME: ${MYSQL_DATABASE:-quantmind}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USER: ${RABBITMQ_USER:-quantmind}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-quantmind_mq_2026}
+      JWT_SECRET: ${JWT_SECRET:-quantmind-secret-key-2026}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin@2026!}
+      AKSHARE_SERVICE_URL: "http://akshare:9090"
+      PAGE_CACHE_DIR: "/app/temp/pages"
+    ports:
+      - "8004:8080"
+    volumes:
+      - ./temp:/app/temp
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      akshare:
+        condition: service_healthy
+    networks:
+      - quantmind-net
+    restart: unless-stopped
+    dns:
+      - 223.5.5.5
+      - 8.8.8.8
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  akshare:
+    build:
+      context: ./backend/akshare_service
+      dockerfile: Dockerfile
+      network: host
+    container_name: quantmind-akshare
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - quantmind-net
+    restart: unless-stopped
+    dns:
+      - 223.5.5.5
+      - 8.8.8.8
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      network: host
+    container_name: quantmind-frontend
+    ports:
+      - "3004:80"
+    depends_on:
+      - backend
+    networks:
+      - quantmind-net
+    restart: unless-stopped
+    dns:
+      - 223.5.5.5
+      - 8.8.8.8
+
+volumes:
+  mysql_data:
+  rabbitmq_data:
+
+networks:
+  quantmind-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

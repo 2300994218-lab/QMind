@@ -1,0 +1,263 @@
+import { useState, useEffect, useRef } from 'react'
+import { listAgents, listConversations, createConversation, getMessages, sendMessage, deleteConversation } from '../services/api'
+import { Send, Plus, Trash2, Bot, User, Loader2, MessageSquare, Stethoscope, TrendingUp, Brain } from 'lucide-react'
+import toast from 'react-hot-toast'
+import ReactMarkdown from 'react-markdown'
+
+const AGENT_ICONS = {
+  smart_ask: MessageSquare,
+  smart_diagnose: Stethoscope,
+  main_flow: TrendingUp,
+  quant_expert: Brain,
+}
+
+const AGENT_COLORS = {
+  smart_ask: '#513CC8',
+  smart_diagnose: '#22C55E',
+  main_flow: '#F59E0B',
+  quant_expert: '#8B5CF6',
+}
+
+export default function ChatPage({ agentType }) {
+  const [agents, setAgents] = useState([])
+  const [selectedAgent, setSelectedAgent] = useState(null)
+  const [conversations, setConversations] = useState([])
+  const [selectedConv, setSelectedConv] = useState(null)
+  const [messages, setMessages] = useState([])
+  const [input, setInput] = useState('')
+  const [loading, setLoading] = useState(false)
+  const messagesEndRef = useRef(null)
+
+  useEffect(() => {
+    loadAgents()
+    loadConversations()
+  }, [agentType])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const loadAgents = async () => {
+    try {
+      const res = await listAgents()
+      if (res.code === 0) {
+        const filtered = (res.data || []).filter(a => a.agent_type === agentType)
+        setAgents(filtered)
+        if (filtered.length > 0) setSelectedAgent(filtered[0])
+      }
+    } catch (e) {}
+  }
+
+  const loadConversations = async () => {
+    try {
+      const res = await listConversations()
+      if (res.code === 0) setConversations(res.data || [])
+    } catch (e) {}
+  }
+
+  const loadMessages = async (convId) => {
+    try {
+      const res = await getMessages(convId)
+      if (res.code === 0) setMessages(res.data || [])
+    } catch (e) {}
+  }
+
+  const handleNewConversation = async () => {
+    if (!selectedAgent) { toast.error('请先选择智能体'); return }
+    try {
+      const res = await createConversation({
+        title: `${selectedAgent.name} 对话`,
+        agent_id: selectedAgent.id,
+      })
+      if (res.code === 0) {
+        setSelectedConv(res.data)
+        setMessages([])
+        loadConversations()
+      }
+    } catch (e) { toast.error('创建对话失败') }
+  }
+
+  const handleSend = async () => {
+    if (!input.trim()) return
+    if (!selectedConv) {
+      await handleNewConversation()
+      return
+    }
+
+    const userInput = input
+    setInput('')
+    setMessages(prev => [...prev, { role: 'user', content: userInput, created_at: new Date().toISOString() }])
+    setLoading(true)
+
+    try {
+      const res = await sendMessage(selectedConv.id, userInput)
+      if (res.code === 0) {
+        setMessages(prev => [...prev, res.data.ai_message])
+      } else {
+        toast.error(res.message)
+      }
+    } catch (e) {
+      toast.error('发送消息失败')
+      setMessages(prev => [...prev, { role: 'assistant', content: '抱歉，请求失败，请检查AI模型配置。', created_at: new Date().toISOString() }])
+    }
+    setLoading(false)
+  }
+
+  const selectConversation = (conv) => {
+    setSelectedConv(conv)
+    loadMessages(conv.id)
+  }
+
+  const handleDeleteConv = async (id, e) => {
+    e.stopPropagation()
+    await deleteConversation(id)
+    if (selectedConv?.id === id) {
+      setSelectedConv(null)
+      setMessages([])
+    }
+    loadConversations()
+  }
+
+  const Icon = AGENT_ICONS[agentType] || Brain
+  const color = AGENT_COLORS[agentType] || '#513CC8'
+
+  const EXAMPLES = {
+    smart_ask: ['查询贵州茅台600519今日行情', '分析宁德时代300750的技术指标', '比亚迪002594最近资金流向如何？'],
+    smart_diagnose: ['诊断贵州茅台600519', '帮我分析宁德时代300750的投资价值', '评估比亚迪002594当前是否适合买入'],
+    main_flow: ['分析600519贵州茅台的主力动向', '最近哪些股票有大资金建仓迹象？', '分析300750宁德时代的筹码分布'],
+    quant_expert: ['当前市场有哪些突破型机会？', '帮我分析半导体板块的热度和轮动', '600519贵州茅台的综合量化评分是多少？'],
+  }
+
+  return (
+    <div className="flex h-full" style={{ background: '#F8F9FC' }}>
+      {/* Conversation List */}
+      <div className="w-64 border-r border-gray-200 flex flex-col bg-white">
+        <div className="p-3 border-b border-gray-100">
+          <button onClick={handleNewConversation}
+            className="w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm font-medium text-white transition hover:shadow-md"
+            style={{ background: color }}>
+            <Plus size={16} /> 新对话
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {conversations.filter(c => {
+            if (!selectedAgent) return true
+            return c.agent_id === selectedAgent.id
+          }).map(conv => (
+            <div key={conv.id} onClick={() => selectConversation(conv)}
+              className={`flex items-center justify-between p-3 cursor-pointer transition text-sm border-b border-gray-50 ${
+                selectedConv?.id === conv.id ? 'bg-gray-50' : 'hover:bg-gray-50'
+              }`}>
+              <div className="flex items-center gap-2 overflow-hidden">
+                <Icon size={14} style={{ color }} />
+                <span className="truncate text-gray-700">{conv.title}</span>
+              </div>
+              <button onClick={(e) => handleDeleteConv(conv.id, e)}
+                className="text-gray-300 hover:text-red-400 flex-shrink-0">
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Chat Area */}
+      <div className="flex-1 flex flex-col">
+        {/* Header */}
+        <div className="p-4 border-b border-gray-200 flex items-center gap-3 bg-white">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: `${color}10` }}>
+            <Icon size={18} style={{ color }} />
+          </div>
+          <div>
+            <h2 className="text-sm font-semibold text-gray-900">{selectedAgent?.name || '智能体'}</h2>
+            <p className="text-xs text-gray-400">{selectedAgent?.description?.slice(0, 60) || 'Hermes Agent 驱动'}</p>
+          </div>
+        </div>
+
+        {/* Messages */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {messages.length === 0 && (
+            <div className="text-center py-12">
+              <div className="w-16 h-16 rounded-2xl mx-auto mb-4 flex items-center justify-center" style={{ background: `${color}08` }}>
+                <Icon size={32} style={{ color }} />
+              </div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">{selectedAgent?.name || '智能体'}</h3>
+              <p className="text-sm text-gray-400 mb-6 max-w-md mx-auto">{selectedAgent?.description || '开始对话吧'}</p>
+              <div className="space-y-2 max-w-md mx-auto">
+                {(EXAMPLES[agentType] || []).map((ex, i) => (
+                  <button key={i} onClick={() => { setInput(ex); if (!selectedConv) handleNewConversation() }}
+                    className="w-full p-3 rounded-xl text-left text-sm text-gray-500 hover:text-gray-800 bg-white hover:bg-gray-50 transition border border-gray-200 hover:border-gray-300 shadow-sm">
+                    {ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {messages.map((msg, i) => (
+            <div key={i} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+              <div className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0`}
+                style={{ background: msg.role === 'user' ? '#513CC810' : `${color}10` }}>
+                {msg.role === 'user' ? <User size={16} style={{ color: '#513CC8' }} /> : <Icon size={16} style={{ color }} />}
+              </div>
+              <div className={`max-w-[70%] p-3 rounded-xl text-sm leading-relaxed ${
+                msg.role === 'user'
+                  ? 'text-white rounded-tr-none shadow-md'
+                  : 'bg-white text-gray-800 rounded-tl-none border border-gray-200 shadow-sm'
+              }`}
+                style={msg.role === 'user' ? { background: '#513CC8' } : {}}>
+                {msg.role === 'user' ? (
+                  <div className="whitespace-pre-wrap">{msg.content}</div>
+                ) : (
+                  <div className="prose prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:rounded [&_pre]:bg-gray-50 [&_pre]:p-2 [&_pre]:rounded-lg [&_table]:text-xs [&_th]:p-1 [&_td]:p-1">
+                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  </div>
+                )}
+                <p className="text-[10px] mt-2" style={{ color: msg.role === 'user' ? 'rgba(255,255,255,0.6)' : '#9CA3AF' }}>
+                  {new Date(msg.created_at).toLocaleTimeString()}
+                </p>
+              </div>
+            </div>
+          ))}
+
+          {loading && (
+            <div className="flex gap-3">
+              <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: `${color}10` }}>
+                <Loader2 size={16} className="animate-spin" style={{ color }} />
+              </div>
+              <div className="bg-white p-3 rounded-xl rounded-tl-none border border-gray-200 shadow-sm">
+                <div className="flex gap-1">
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{animationDelay:'0ms'}}></span>
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{animationDelay:'150ms'}}></span>
+                  <span className="w-2 h-2 bg-gray-300 rounded-full animate-bounce" style={{animationDelay:'300ms'}}></span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Input */}
+        <div className="p-4 border-t border-gray-200 bg-white">
+          <div className="flex items-center gap-3">
+            <input
+              type="text" value={input} onChange={e => setInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
+              placeholder={`向${selectedAgent?.name || '智能体'}提问...`}
+              className="flex-1 py-3 px-4 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-400 focus:border-[#513CC8] focus:ring-2 focus:ring-[#513CC8]/10 focus:outline-none text-sm"
+              disabled={loading}
+            />
+            <button onClick={handleSend} disabled={loading || !input.trim()}
+              className="w-10 h-10 rounded-xl flex items-center justify-center text-white transition hover:shadow-lg disabled:opacity-30"
+              style={{ background: color }}>
+              <Send size={18} />
+            </button>
+          </div>
+          <p className="text-[10px] text-gray-400 mt-2 text-center">
+            Hermes Agent · 数据来自Baostock/东方财富/新浪 · 所有结果需经独立验证
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}

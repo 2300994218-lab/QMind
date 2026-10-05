@@ -1,0 +1,9 @@
+.git
+.gitignore
+quantmind-server.exe
+*.db
+*.db-wal
+*.db-shm
+*.log
+tmp
+coverage

@@ -1,0 +1,144 @@
+import useStore from '../store/useStore'
+import { 
+  LayoutDashboard, TrendingUp, Brain, MessageSquare, Stethoscope, 
+  Crown, BarChart3, Settings, Users, Shield, ChevronLeft, ChevronRight,
+  Activity, Zap, Bot, Database, FileText, LogOut, Star, Flame, Megaphone, Target, Radio, Bookmark, X, Compass, Newspaper
+} from 'lucide-react'
+
+const menuItems = [
+  // 市场总览
+  { key: 'dashboard', label: '看板大屏', icon: LayoutDashboard, group: '市场总览' },
+  { key: 'realtime', label: '实时行情', icon: TrendingUp, group: '市场总览' },
+  { key: 'broadcast', label: '股市播报', icon: Radio, group: '市场总览' },
+  { key: 'hotmoney-board', label: '游资打板', icon: Zap, group: '市场总览' },
+  { key: 'hot-list', label: '市场热榜', icon: Flame, group: '市场总览' },
+  { key: 'investment-news', label: '投资资讯', icon: Newspaper, group: '市场总览' },
+  // 研判智策
+  { key: 'stock-decision', label: '买卖决策', icon: Brain, group: '研判智策' },
+  { key: 'master-judge', label: '大师研判', icon: Crown, group: '研判智策' },
+  { key: 'ai-stock-pick', label: '隔夜套利', icon: Target, group: '研判智策' },
+  { key: 'jince-compass', label: '金策罗盘', icon: Compass, group: '研判智策' },
+  // 小樊推荐
+  { key: 'watchlist', label: '自选个股', icon: Star, group: '小樊推荐' },
+  { key: 'xiaofan-select', label: '小樊精选', icon: Bookmark, group: '小樊推荐' },
+  // 系统管理
+  { key: 'stock-picks', label: '今日推荐', icon: Megaphone, group: '系统管理', adminOnly: true },
+  { key: 'users', label: '用户管理', icon: Users, group: '系统管理', adminOnly: true },
+  { key: 'audit-logs', label: '审计日志', icon: Shield, group: '系统管理', adminOnly: true },
+  { key: 'settings', label: '系统设置', icon: Settings, group: '系统管理', adminOnly: true },
+]
+
+export default function Sidebar() {
+  const { currentPage, setCurrentPage, sidebarCollapsed, toggleSidebar, user, logout, mobileMenuOpen, setMobileMenuOpen } = useStore()
+
+  const groups = [...new Set(menuItems.map(i => i.group))]
+
+  const sidebarContent = (
+    <div className="h-full flex flex-col" style={{ background: '#FFFFFF' }}>
+      
+      {/* Logo */}
+      <div className="flex items-center justify-between p-4 border-b border-gray-100">
+        <div className="flex items-center">
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: '#513CC8' }}>
+            <svg width="22" height="22" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M16 5C9.9 5 5 9.9 5 16s4.9 11 11 11c2.4 0 4.7-.8 6.5-2.1l2.6 2.6c.4.4 1.1.4 1.6 0 .4-.4.4-1.1 0-1.6l-2.6-2.6C25.2 21.5 27 18.9 27 16c0-6.1-4.9-11-11-11z" fill="none" stroke="white" strokeWidth="2.2"/>
+              <path d="M18 10l-4 6.5h3l-1 5.5 4.5-7h-3l1-5z" fill="white"/>
+            </svg>
+          </div>
+          {(!sidebarCollapsed || mobileMenuOpen) && (
+            <div className="ml-3 overflow-hidden">
+              <h1 className="text-sm font-bold whitespace-nowrap" style={{ color: '#513CC8' }}>QuantMind <span className="text-[9px] font-normal px-1 py-0.5 rounded" style={{ background: '#F0EDFA', color: '#513CC8' }}>v0.1.2</span></h1>
+              <p className="text-[10px] text-gray-400 whitespace-nowrap">AI量化平台</p>
+            </div>
+          )}
+        </div>
+        {/* Mobile close button */}
+        <button 
+          onClick={() => setMobileMenuOpen(false)}
+          className="md:hidden p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition"
+        >
+          <X size={20} />
+        </button>
+      </div>
+
+      {/* Menu */}
+      <div className="flex-1 overflow-y-auto py-2">
+        {groups.map(group => (
+          <div key={group}>
+            {(!sidebarCollapsed || mobileMenuOpen) && (
+              <div className="px-4 py-2 text-[10px] text-gray-400 uppercase tracking-wider font-medium">{group}</div>
+            )}
+            {menuItems.filter(i => i.group === group).filter(i => !i.adminOnly || user?.role === 'admin').map(item => {
+              const Icon = item.icon
+              const active = currentPage === item.key
+              return (
+                <button key={item.key} onClick={() => setCurrentPage(item.key)}
+                  className={`w-full flex items-center px-3 py-2.5 mx-1 rounded-lg transition-all text-sm
+                    ${active 
+                      ? 'text-[#513CC8] font-medium' 
+                      : 'text-gray-500 hover:text-gray-900 hover:bg-gray-50'}`}
+                  style={active ? { background: '#F0EDFA', borderLeft: '3px solid #513CC8' } : {}}
+                  title={item.label}>
+                  <Icon size={18} className={`flex-shrink-0 ${sidebarCollapsed && !mobileMenuOpen ? 'mx-auto' : ''}`} 
+                    style={active ? { color: '#513CC8' } : {}} />
+                  {(!sidebarCollapsed || mobileMenuOpen) && <span className="ml-3 whitespace-nowrap">{item.label}</span>}
+                </button>
+              )
+            })}
+          </div>
+        ))}
+      </div>
+
+      {/* Footer */}
+      <div className="border-t border-gray-100 p-3">
+        {(!sidebarCollapsed || mobileMenuOpen) && user && (
+          <div className="flex items-center mb-2 px-2">
+            <div className="w-7 h-7 rounded-full flex items-center justify-center text-xs text-white font-bold"
+              style={{ background: '#513CC8' }}>
+              {user.display_name?.[0] || user.username?.[0] || 'U'}
+            </div>
+            <div className="ml-2 overflow-hidden">
+              <p className="text-xs text-gray-900 truncate font-medium">{user.display_name || user.username}</p>
+              <p className="text-[10px] text-gray-400">{user.role === 'admin' ? '管理员' : '用户'}</p>
+            </div>
+          </div>
+        )}
+        <div className="flex items-center gap-1">
+          {/* Desktop collapse button - hidden on mobile */}
+          <button onClick={toggleSidebar} className="hidden md:flex flex-1 items-center justify-center p-2 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-50 transition">
+            {sidebarCollapsed ? <ChevronRight size={16}/> : <ChevronLeft size={16}/>}
+          </button>
+          {(!sidebarCollapsed || mobileMenuOpen) && (
+            <button onClick={logout} className="flex-1 flex items-center justify-center p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition text-xs gap-1">
+              <LogOut size={14} /> 退出
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+
+  return (
+    <>
+      {/* Desktop Sidebar - hidden on mobile */}
+      <div className={`hidden md:block h-full border-r border-gray-200 transition-all duration-300 ${sidebarCollapsed ? 'w-16' : 'w-56'}`}>
+        {sidebarContent}
+      </div>
+
+      {/* Mobile Sidebar Overlay */}
+      {mobileMenuOpen && (
+        <div 
+          className="md:hidden fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
+          onClick={() => setMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* Mobile Sidebar Drawer */}
+      <div className={`md:hidden fixed inset-y-0 left-0 z-50 w-72 transform transition-transform duration-300 ease-in-out shadow-2xl
+        ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        {sidebarContent}
+      </div>
+    </>
+  )
+}
