@@ -4,6 +4,8 @@
 
 <h1 align="center">QuantMind</h1>
 
+<p align="center"><strong>当前版本：v0.1.2</strong></p>
+
 <p align="center">
   <strong>A股 AI 量化交易平台</strong><br/>
   <sub>基于 Hermes Agent 架构 · 多源实时行情 · 9 套量化策略 · 全栈一键部署</sub>
@@ -306,7 +308,7 @@ docker-compose up -d
 docker-compose ps
 
 # 5. 浏览器访问
-open http://localhost
+open http://localhost:3004
 ```
 
 > **国内加速**：后端 Dockerfile 已内置 `GOPROXY=https://goproxy.cn,direct`，前端使用 npm 镜像。
@@ -317,14 +319,15 @@ open http://localhost
 # 终端 1 —— 后端（使用 SQLite，零配置启动）
 cd backend
 export DB_DRIVER=sqlite
+export SERVER_PORT=8004
 go run ./cmd/server
-# API 运行于 http://localhost:8080
+# API 运行于 http://localhost:8004
 
 # 终端 2 —— 前端（Vite 开发服务器，支持 HMR）
 cd frontend
 npm install
 npm run dev
-# UI 运行于 http://localhost:3000（自动代理 /api → :8080）
+# UI 运行于 http://localhost:3004（自动代理 /api → :8004）
 ```
 
 ### 默认登录凭据
@@ -339,8 +342,8 @@ npm run dev
 
 | 服务 | 端口 | 协议 | 说明 |
 |------|------|------|------|
-| Frontend | **80** | HTTP | Web 界面（Nginx 托管） |
-| Backend | **8080** | HTTP | RESTful API（Gin） |
+| Frontend | **3004** | HTTP | Web 界面（Nginx 托管） |
+| Backend | **8004** | HTTP | RESTful API（Gin） |
 | AkShare | **9090** | HTTP | Python 微服务 |
 | MySQL | **3306** | TCP | 关系型数据库 |
 | RabbitMQ | **5672** | AMQP | 消息队列 |
@@ -584,7 +587,7 @@ QuantMind 集成 6 大渠道 A 股行情数据，多源冗余保障数据可用�
 
 | 变量 | 默认值 | 必需 | 说明 |
 |------|--------|------|------|
-| `SERVER_PORT` | `8080` | - | 后端 HTTP 端口 |
+| `SERVER_PORT` | `8004` | - | 后端 HTTP 端口 |
 | `GIN_MODE` | `debug` | - | Gin 模式（`debug` / `release`） |
 | `DB_DRIVER` | `mysql` | - | 数据库驱动（`mysql` / `sqlite`） |
 | `DB_HOST` | `mysql` | Docker | MySQL 主机名 |
@@ -595,6 +598,7 @@ QuantMind 集成 6 大渠道 A 股行情数据，多源冗余保障数据可用�
 | `JWT_SECRET` | `quantmind-secret-key-2026` | **是** | JWT 签名密钥（生产环境务必更换） |
 | `ADMIN_USER` | `admin` | - | 初始管理员用户名 |
 | `ADMIN_PASSWORD` | `Admin@2026!` | - | 初始管理员密码 |
+| `PAGE_CACHE_DIR` | 自动定位 `temp/pages` | - | 页面响应磁盘缓存目录；Docker 固定为 `/app/temp/pages` |
 
 ### 消息队列
 
@@ -699,6 +703,15 @@ docker-compose up -d
 ---
 
 ## 版本记录
+
+### v0.1.2（2026-09-05）
+
+- 新增页面级“懒加载 + 保活”：页面首次进入后保留组件状态、筛选条件和独立滚动位置，切回不再整页重载。
+- 新增项目内持久化响应缓存 `temp/pages/<页面标识>/`，Docker 与本地启动均可使用。
+- GET 缓存按登录用户隔离；实时、市场、资讯和历史数据采用不同 TTL。
+- 写操作自动清理当前页面缓存；`refresh=true` 和手动刷新可绕过并原子更新缓存。
+- 缓存启动时自动清理过期/损坏/旧版本文件，并限制单文件 20 MiB、总缓存 512 MiB。
+- 修正游资打板每次进入都强制远端刷新的行为，手动点击刷新时才强制更新。
 
 ### v2.1（2026-05-03）
 

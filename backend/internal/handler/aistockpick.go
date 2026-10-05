@@ -23,9 +23,13 @@ import (
 // ==================== 隔夜套利 - 尾盘选股八步筛选策略 ====================
 // 完全基于真实行情数据（AkShare/Eastmoney），禁止虚假数据
 
-// screeningMutex prevents concurrent screening runs
+// screeningMutex guards the run-state fields below
 var screeningMutex sync.Mutex
-var lastScreeningTime time.Time
+var screeningActive bool
+var lastSuccessfulScreening time.Time
+
+// A failed run never consumes the cooldown, so clicking again retries at once.
+const screeningCooldown = 30 * time.Minute
 
 // StartAIStockPickScheduler starts the screening scheduler
 // Runs at 13:30, 14:30, 15:30 China time on trading days
@@ -41,11 +45,6 @@ func StartAIStockPickScheduler() {
 			loc, _ := time.LoadLocation("Asia/Shanghai")
 			now := time.Now().In(loc)
 
-			// Skip weekends
-			if now.Weekday() == time.Saturday || now.Weekday() == time.Sunday {
-				continue
-			}
-
 			hour := now.Hour()
 			minute := now.Minute()
 
@@ -57,75 +56,164 @@ func StartAIStockPickScheduler() {
 				shouldRun = true
 			}
 
-			if shouldRun {
-				// Check if already run recently (within 50 minutes)
-				if time.Since(lastScreeningTime) > 50*time.Minute {
-					tradeDate := now.Format("20060102")
-					log.Printf("[隔夜套利] 定时触发筛选 %s %02d:%02d", tradeDate, hour, minute)
-					go runAIStockScreening(tradeDate)
-				}
+			if !shouldRun {
+				continue
 			}
+
+			// Check if already run recently (within 50 minutes)
+			if !lastSuccessfulScreening.IsZero() && time.Since(lastSuccessfulScreening) <= 50*time.Minute {
+				continue
+			}
+
+			tradeDate := now.Format("20060102")
+			// A weekend or holiday has no fresh tape; skip instead of writing a
+			// batch that looks like today's market.
+			latest, err := getLatestTradingDate()
+			if err != nil {
+				log.Printf("[隔夜套利] 定时触发跳过 - 无法确认最近交易日: %v", err)
+				continue
+			}
+			if latest != tradeDate {
+				log.Printf("[隔夜套利] 定时触发跳过 - %s 休市(最近交易日 %s)", tradeDate, latest)
+				continue
+			}
+
+			log.Printf("[隔夜套利] 定时触发筛选 %s %02d:%02d", tradeDate, hour, minute)
+			go runAIStockScreening(tradeDate)
 		}
 	}()
 }
 
-// runAIStockScreening executes the 8-step screening process with REAL data only
-func runAIStockScreening(tradeDate string) {
+// reserveScreening checks the run gates and writes the batch record.
+// It returns the reason when the run cannot start instead of failing silently.
+func reserveScreening(tradeDate string) (*model.AIStockPickBatch, error) {
+	if len(tradeDate) != 8 {
+		return nil, fmt.Errorf("交易日期格式错误: %s", tradeDate)
+	}
+
 	screeningMutex.Lock()
 	defer screeningMutex.Unlock()
 
-	// Prevent running too frequently (minimum 30 min gap)
-	if time.Since(lastScreeningTime) < 30*time.Minute {
-		log.Printf("[隔夜套利] 跳过 - 距上次运行仅 %s", time.Since(lastScreeningTime))
-		return
+	if screeningActive {
+		return nil, fmt.Errorf("上一次筛选仍在执行中（获取全市场行情约需 1-2 分钟），请稍候")
 	}
-	lastScreeningTime = time.Now()
+	if !lastSuccessfulScreening.IsZero() && time.Since(lastSuccessfulScreening) < screeningCooldown {
+		return nil, fmt.Errorf("距上次成功筛选仅 %s，冷却期 %s 内不重复运行",
+			time.Since(lastSuccessfulScreening).Round(time.Second), screeningCooldown)
+	}
 
 	loc, _ := time.LoadLocation("Asia/Shanghai")
 	now := time.Now().In(loc)
 	screenTime := now.Format("15:04")
-	batchID := fmt.Sprintf("%s_%s", tradeDate, strings.Replace(screenTime, ":", "", -1))
-	tradeDateFormatted := fmt.Sprintf("%s-%s-%s", tradeDate[:4], tradeDate[4:6], tradeDate[6:])
 
-	log.Printf("[隔夜套利] 开始八步筛选 %s (批次: %s)", tradeDate, batchID)
+	dataDate, note := resolveTradeDate(tradeDate)
+	tradeDateFormatted := fmt.Sprintf("%s-%s-%s", dataDate[:4], dataDate[4:6], dataDate[6:])
 
-	// Create batch record
 	batch := model.AIStockPickBatch{
-		BatchID:    batchID,
+		BatchID:    uniqueBatchID(dataDate, screenTime),
 		TradeDate:  tradeDateFormatted,
 		ScreenTime: screenTime,
 		Status:     "running",
+		ErrorMsg:   note,
 	}
-	repository.DB.Create(&batch)
+	if err := repository.DB.Create(&batch).Error; err != nil {
+		return nil, fmt.Errorf("创建筛选批次失败: %v", err)
+	}
 
-	// ========== Step 0: Fetch real market data (3-level fallback) ==========
-	var dataSource string
-	allStocks, err := fetchRealTimeStocks()
-	if err != nil || len(allStocks) == 0 {
-		log.Printf("[隔夜套利] 数据源1(AkShare)失败: %v, 尝试Eastmoney实时接口...", err)
-		allStocks, err = fetchFromEastmoneyDaily(tradeDate)
-		if err != nil || len(allStocks) == 0 {
-			log.Printf("[隔夜套利] 数据源2(Eastmoney push2实时)失败: %v, 尝试Eastmoney历史接口...", err)
-			allStocks, err = fetchFromEastmoneyHistorical(tradeDate)
-			if err != nil || len(allStocks) == 0 {
-				log.Printf("[隔夜套利] 所有数据源均失败，本次筛选终止")
-				batch.Status = "failed"
-				batch.ErrorMsg = fmt.Sprintf("三个数据源均不可用: %v", err)
-				repository.DB.Save(&batch)
-				return
-			}
-			dataSource = "Eastmoney历史数据"
-		} else {
-			dataSource = "Eastmoney实时数据"
+	screeningActive = true
+	return &batch, nil
+}
+
+// joinBatchNote keeps the trading-day note alongside the data-source status.
+func joinBatchNote(note, add string) string {
+	if strings.TrimSpace(note) == "" {
+		return add
+	}
+	return note + " | " + add
+}
+
+// uniqueBatchID keeps batch IDs collision-free when several runs land in the same minute
+func uniqueBatchID(tradeDate, screenTime string) string {
+	base := fmt.Sprintf("%s_%s", tradeDate, strings.Replace(screenTime, ":", "", -1))
+	id := base
+	for i := 2; i <= 20; i++ {
+		var count int64
+		repository.DB.Model(&model.AIStockPickBatch{}).Where("batch_id = ?", id).Count(&count)
+		if count == 0 {
+			return id
 		}
-	} else {
-		dataSource = "AkShare实时数据"
+		id = fmt.Sprintf("%s_r%d", base, i)
+	}
+	return base
+}
+
+// runAIStockScreening executes the 8-step screening process with REAL data only
+func runAIStockScreening(tradeDate string) {
+	batch, err := reserveScreening(tradeDate)
+	if err != nil {
+		log.Printf("[隔夜套利] 跳过 - %v", err)
+		return
+	}
+	runScreeningForBatch(tradeDate, batch)
+}
+
+func runScreeningForBatch(tradeDate string, batch *model.AIStockPickBatch) {
+	defer func() {
+		screeningMutex.Lock()
+		screeningActive = false
+		screeningMutex.Unlock()
+	}()
+
+	// The batch may have been re-dated to the latest real trading day.
+	tradeDateFormatted := batch.TradeDate
+	tradeDate = strings.ReplaceAll(tradeDateFormatted, "-", "")
+	batchID := batch.BatchID
+
+	log.Printf("[隔夜套利] 开始八步筛选 %s (批次: %s)", tradeDate, batchID)
+
+	// ========== Step 0: Fetch real market data (4-level fallback) ==========
+	sources := []struct {
+		name           string
+		fetch          func() ([]dailyStock, error)
+		hasVolumeRatio bool
+	}{
+		{"AkShare实时数据", fetchRealTimeStocks, true},
+		{"Eastmoney实时数据", func() ([]dailyStock, error) { return fetchFromEastmoneyDaily(tradeDate) }, true},
+		{"Eastmoney历史数据", func() ([]dailyStock, error) { return fetchFromEastmoneyHistorical(tradeDate) }, true},
+		{"新浪实时数据(量比由腾讯补充)", fetchFromSinaDaily, false},
+	}
+
+	var allStocks []dailyStock
+	var dataSource string
+	var volumeRatioFromSource bool
+	var sourceErrs []string
+	for _, src := range sources {
+		lists, err := src.fetch()
+		if err == nil && len(lists) == 0 {
+			err = fmt.Errorf("返回0只股票")
+		}
+		if err != nil {
+			sourceErrs = append(sourceErrs, fmt.Sprintf("%s: %v", src.name, err))
+			log.Printf("[隔夜套利] 数据源 %s 失败: %v", src.name, err)
+			continue
+		}
+		allStocks = lists
+		dataSource = src.name
+		volumeRatioFromSource = src.hasVolumeRatio
+		break
+	}
+	if len(allStocks) == 0 {
+		log.Printf("[隔夜套利] 所有数据源均失败，本次筛选终止")
+		batch.Status = "failed"
+		batch.ErrorMsg = joinBatchNote(batch.ErrorMsg, "四个数据源均不可用 -> "+strings.Join(sourceErrs, " | "))
+		repository.DB.Save(batch)
+		return
 	}
 	log.Printf("[隔夜套利] 数据源: %s", dataSource)
 
 	batch.TotalStocks = len(allStocks)
-	batch.ErrorMsg = fmt.Sprintf("数据源: %s", dataSource)
-	repository.DB.Save(&batch)
+	batch.ErrorMsg = joinBatchNote(batch.ErrorMsg, fmt.Sprintf("数据源: %s", dataSource))
+	repository.DB.Save(batch)
 	log.Printf("[隔夜套利] 获取到 %d 只A股数据 (来源: %s)", len(allStocks), dataSource)
 
 	// ========== Step 1: 主板股票(排除ST) ==========
@@ -139,6 +227,11 @@ func runAIStockScreening(tradeDate string) {
 	log.Printf("[隔夜套利] Step2 涨幅3%%-5%%: %d 只", len(pctFiltered))
 
 	// ========== Step 3: 近20日有涨停记录 ==========
+	// Sina's snapshot has no volume ratio, and Step 3's fallback threshold reads it,
+	// so fill it from Tencent quotes for the surviving candidates first.
+	if !volumeRatioFromSource && len(pctFiltered) > 0 {
+		enrichVolumeRatioFromTencent(pctFiltered)
+	}
 	limitFiltered := filterByRecentLimitUp(pctFiltered, tradeDate)
 	batch.LimitFilter = len(limitFiltered)
 	log.Printf("[隔夜套利] Step3 近期涨停: %d 只", len(limitFiltered))
@@ -168,11 +261,6 @@ func runAIStockScreening(tradeDate string) {
 		return calculatePickScore(finalStocks[i]) > calculatePickScore(finalStocks[j])
 	})
 
-	// Save results
-	batch.ResultCount = len(finalStocks)
-	batch.Status = "completed"
-	repository.DB.Save(&batch)
-
 	// Delete old results for this batch
 	repository.DB.Where("batch_id = ?", batchID).Delete(&model.AIStockPick{})
 
@@ -200,7 +288,7 @@ func runAIStockScreening(tradeDate string) {
 			PassedSteps:  passedSteps,
 			Note:         reason,
 			TradeDate:    tradeDateFormatted,
-			ScreenTime:   screenTime,
+			ScreenTime:   batch.ScreenTime,
 		}
 		repository.DB.Create(&pick)
 		if i < 5 {
@@ -208,6 +296,13 @@ func runAIStockScreening(tradeDate string) {
 				stock.Code, stock.Name, stock.PctChg, stock.TurnoverRate, stock.VolumeRatio, stock.TotalMV)
 		}
 	}
+
+	// Flip the batch to completed only after its picks are on disk, so a poller
+	// never reports "完成" while the statistics still show zero rows.
+	batch.ResultCount = len(finalStocks)
+	batch.Status = "completed"
+	repository.DB.Save(batch)
+	lastSuccessfulScreening = time.Now()
 
 	log.Printf("[隔夜套利] 筛选完成: %d 只股票通过八步筛选", len(finalStocks))
 }
@@ -473,6 +568,178 @@ func fetchFromEastmoneyHistorical(tradeDate string) ([]dailyStock, error) {
 	return allStocks, nil
 }
 
+// fetchFromSinaDaily pulls the full A-share snapshot from Sina market center,
+// the last-resort source when AkShare and both Eastmoney hosts are unreachable.
+func fetchFromSinaDaily() ([]dailyStock, error) {
+	nodes := []struct {
+		node string
+		name string
+	}{
+		{"sh_a", "沪市A股"},
+		{"sz_a", "深市A股"},
+	}
+	const pageSize = 100
+	const maxPages = 80
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	var allStocks []dailyStock
+
+	for _, n := range nodes {
+		for page := 1; page <= maxPages; page++ {
+			url := fmt.Sprintf("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=%d&num=%d&sort=symbol&asc=1&node=%s",
+				page, pageSize, n.node)
+			req, err := http.NewRequest("GET", url, nil)
+			if err != nil {
+				break
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			req.Header.Set("Referer", "https://finance.sina.com.cn")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				log.Printf("[隔夜套利] 新浪 %s 第%d页请求失败: %v", n.name, page, err)
+				break
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+
+			if resp.StatusCode != 200 || len(body) == 0 || isHTMLResponse(body) {
+				log.Printf("[隔夜套利] 新浪 %s 第%d页返回异常(HTTP %d, %d 字节)", n.name, page, resp.StatusCode, len(body))
+				break
+			}
+
+			var rows []map[string]interface{}
+			if err := json.Unmarshal(body, &rows); err != nil {
+				log.Printf("[隔夜套利] 新浪 %s 第%d页解析失败: %v", n.name, page, err)
+				break
+			}
+			if len(rows) == 0 {
+				break
+			}
+
+			for _, r := range rows {
+				code := safeString(r, "code")
+				name := safeString(r, "name")
+				closePrice := safeFloat(r, "trade")
+				if code == "" || name == "" || closePrice <= 0 {
+					continue
+				}
+				allStocks = append(allStocks, dailyStock{
+					Code:         code,
+					Name:         name,
+					Close:        closePrice,
+					PctChg:       safeFloat(r, "changepercent"),
+					Open:         safeFloat(r, "open"),
+					High:         safeFloat(r, "high"),
+					Low:          safeFloat(r, "low"),
+					PreClose:     safeFloat(r, "settlement"),
+					Volume:       safeFloat(r, "volume"),
+					Amount:       safeFloat(r, "amount") / 100000000, // 元 -> 亿
+					TurnoverRate: safeFloat(r, "turnoverratio"),
+					TotalMV:      safeFloat(r, "mktcap") / 10000, // 万元 -> 亿
+					CircMV:       safeFloat(r, "nmc") / 10000,
+				})
+			}
+			if len(rows) < pageSize {
+				break
+			}
+		}
+		log.Printf("[隔夜套利] 新浪 %s 累计获取 %d 只", n.name, len(allStocks))
+	}
+
+	if len(allStocks) == 0 {
+		return nil, fmt.Errorf("新浪行情: 所有节点均无数据")
+	}
+	return allStocks, nil
+}
+
+// enrichVolumeRatioFromTencent fills VolumeRatio from Tencent batch quotes;
+// Sina's snapshot carries no volume ratio, but Step 4 depends on it.
+func enrichVolumeRatioFromTencent(stocks []dailyStock) {
+	const batchSize = 50
+	client := &http.Client{Timeout: 10 * time.Second}
+	filled := 0
+
+	for start := 0; start < len(stocks); start += batchSize {
+		end := start + batchSize
+		if end > len(stocks) {
+			end = len(stocks)
+		}
+		group := stocks[start:end]
+
+		symbols := make([]string, 0, len(group))
+		wanted := make(map[string]int, len(group))
+		for i, s := range group {
+			pure := extractPureCode(s.Code)
+			symbol := pure
+			if strings.HasPrefix(pure, "6") {
+				symbol = "sh" + pure
+			} else {
+				symbol = "sz" + pure
+			}
+			symbols = append(symbols, symbol)
+			wanted[pure] = start + i
+		}
+
+		req, err := http.NewRequest("GET", "https://qt.gtimg.cn/q="+strings.Join(symbols, ","), nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		req.Header.Set("Referer", "http://finance.qq.com")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("[隔夜套利] 腾讯量比请求失败: %v", err)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// Body is GBK; a name byte can collide with '~', so re-anchor each record on
+		// its 6-digit code field instead of trusting fixed indices (量比 sits 47 fields later).
+		for _, line := range strings.Split(string(body), "\n") {
+			eq := strings.Index(line, "=")
+			if eq < 0 {
+				continue
+			}
+			parts := strings.Split(line[eq+1:], "~")
+			codeIdx := -1
+			code := ""
+			for i, p := range parts {
+				if isSixDigitCode(p) {
+					codeIdx = i
+					code = p
+					break
+				}
+			}
+			idx, ok := wanted[code]
+			if !ok || codeIdx < 0 || codeIdx+47 >= len(parts) {
+				continue
+			}
+			ratio, _ := strconv.ParseFloat(parts[codeIdx+47], 64)
+			if ratio > 0 {
+				stocks[idx].VolumeRatio = ratio
+				filled++
+			}
+		}
+	}
+
+	log.Printf("[隔夜套利] 腾讯量比补充完成: %d/%d 只", filled, len(stocks))
+}
+
+func isSixDigitCode(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ==================== Stock data structures ====================
 
 type dailyStock struct {
@@ -527,32 +794,48 @@ func filterByPctChange(stocks []dailyStock, minPct, maxPct float64) []dailyStock
 func filterByRecentLimitUp(stocks []dailyStock, tradeDate string) []dailyStock {
 	// Try to get recent limit-up stocks from multiple sources
 	limitUpCodes := fetchRecentLimitUpCodes(tradeDate)
+	matched := filterStocksInSet(stocks, limitUpCodes)
 
-	if len(limitUpCodes) == 0 {
-		// If no limit-up data available, use a relaxed filter:
-		// Only pass stocks with higher volume ratio (indicates recent activity)
-		log.Println("[隔夜套利] 无法获取涨停历史，使用量比>1.5作为替代条件")
-		var result []dailyStock
+	// The AkShare/DB/Tushare history can be missing entirely or simply not cover
+	// today's candidates. Either way, re-derive limit-ups from real daily bars
+	// (Tencent/Sina) instead of letting Step 3 pass through untouched.
+	if len(matched) == 0 {
+		codes := make([]string, 0, len(stocks))
 		for _, s := range stocks {
-			if s.VolumeRatio >= 1.5 {
-				result = append(result, s)
-			}
+			codes = append(codes, s.Code)
 		}
-		return result
+		if derived := limitUpCodesFromKLines(codes, 20); len(derived) > 0 {
+			matched = filterStocksInSet(stocks, derived)
+			log.Printf("[隔夜套利] Step3 从新浪/腾讯日K识别出 %d/%d 只候选近20日内有涨停", len(matched), len(stocks))
+		}
 	}
 
+	if len(matched) > 0 {
+		return matched
+	}
+
+	// If no limit-up data available, use a relaxed filter:
+	// Only pass stocks with higher volume ratio (indicates recent activity)
+	log.Println("[隔夜套利] 无法获取涨停历史，使用量比>1.5作为替代条件")
 	var result []dailyStock
 	for _, s := range stocks {
-		code := extractPureCode(s.Code)
-		if limitUpCodes[code] || limitUpCodes[s.Code] {
+		if s.VolumeRatio >= 1.5 {
 			result = append(result, s)
 		}
 	}
+	return result
+}
 
-	// If too few stocks pass, relax the filter
-	if len(result) == 0 && len(stocks) > 0 {
-		log.Println("[隔夜套利] 涨停过滤后为0，放宽条件通过所有候选股")
-		return stocks
+// filterStocksInSet keeps the stocks whose code appears in the given set.
+func filterStocksInSet(stocks []dailyStock, codeSet map[string]bool) []dailyStock {
+	if len(codeSet) == 0 {
+		return nil
+	}
+	var result []dailyStock
+	for _, s := range stocks {
+		if codeSet[extractPureCode(s.Code)] || codeSet[s.Code] {
+			result = append(result, s)
+		}
 	}
 	return result
 }
@@ -749,8 +1032,9 @@ func fetchLimitUpCodesFromDB(tradeDate string) map[string]bool {
 	endDate := t.Format("2006-01-02")
 
 	var boards []model.LimitUpBoard
+	// '*_rt' keys only: the legacy 'limit_up' key would hand the picker demo stocks.
 	repository.DB.Where("trade_date >= ? AND trade_date <= ? AND limit_type = ?",
-		startDate, endDate, "limit_up").Find(&boards)
+		startDate, endDate, "limit_up_rt").Find(&boards)
 
 	for _, b := range boards {
 		codes[b.Code] = true
@@ -950,11 +1234,28 @@ func (h *Handler) RunAIStockPick(c *gin.Context) {
 	now := time.Now().In(loc)
 	tradeDate := c.DefaultQuery("date", now.Format("20060102"))
 
-	// Run in background
-	go runAIStockScreening(tradeDate)
+	batch, err := reserveScreening(tradeDate)
+	if err != nil {
+		response.Success(c, gin.H{
+			"status":     "skipped",
+			"message":    err.Error(),
+			"trade_date": tradeDate,
+			"time":       now.Format("15:04:05"),
+		})
+		return
+	}
+
+	go runScreeningForBatch(tradeDate, batch)
+
+	message := "隔夜套利筛选任务已启动，正在获取实时行情..."
+	if !isTradingNow(now) {
+		message = "当前非交易时段(集合竞价/午休/收盘后或休市)，筛选将使用最近交易日 " + batch.TradeDate + " 的收盘数据..."
+	}
 
 	response.Success(c, gin.H{
-		"message":    "隔夜套利筛选任务已提交，正在获取实时行情数据...",
+		"status":     "running",
+		"batch_id":   batch.BatchID,
+		"message":    message,
 		"trade_date": tradeDate,
 		"time":       now.Format("15:04:05"),
 	})

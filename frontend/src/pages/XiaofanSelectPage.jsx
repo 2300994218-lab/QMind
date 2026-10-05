@@ -481,11 +481,11 @@ export default function XiaofanSelectPage() {
   const activeStocks = activeCategory?.stocks || []
 
   // === Fetch real-time quotes (1 minute interval) ===
-  const fetchQuotes = useCallback(async () => {
+  const fetchQuotes = useCallback(async (forceRefresh = false) => {
     if (activeStocks.length === 0) return
     const codes = activeStocks.map(s => s.code).join(',')
     try {
-      const res = await getDataQuote({ codes })
+      const res = await getDataQuote({ codes, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res.code === 0 && res.data) {
         const quotesMap = {}
         if (Array.isArray(res.data)) {
@@ -687,7 +687,7 @@ export default function XiaofanSelectPage() {
   const handleRefresh = async () => {
     setRefreshing(true)
     setStockKlines({}) // force reload all klines
-    await fetchQuotes()
+    await fetchQuotes(true)
     setRefreshing(false)
     toast.success('已刷新')
   }
@@ -732,7 +732,7 @@ export default function XiaofanSelectPage() {
         <div>
           <h1 className={`text-2xl font-bold ${isFullscreen ? 'text-white' : 'gradient-text'}`}>小樊精选</h1>
           <p className={`text-xs mt-1 ${isFullscreen ? 'text-gray-500' : 'text-gray-400'}`}>
-            自定义分类 · 多周期K线 · 通达信+腾讯+东方财富多源数据
+            自定义分类 · 多周期K线 · Tushare+通达信+腾讯+东方财富多源数据
           </p>
         </div>
         <div className="flex items-center gap-2">

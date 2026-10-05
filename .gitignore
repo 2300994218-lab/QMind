@@ -10,6 +10,10 @@ backend/quantmind
 *.so
 *.dylib
 
+# Runtime page-response cache (keep the directory documentation only)
+/temp/pages/*
+!/temp/pages/.gitkeep
+
 # Database
 *.db
 *.sqlite

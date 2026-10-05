@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { getStockQuote, getTrendChart, getChipDistribution, getStockFundFlow } from '../services/api'
+import { getStockQuote, getTrendChart, getChipDistribution, getStockFundFlow, getBroadcastSearch } from '../services/api'
 import { Search, TrendingUp, RefreshCw, Database, BarChart3, Activity } from 'lucide-react'
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine, CartesianGrid, Cell } from 'recharts'
 import toast from 'react-hot-toast'
@@ -20,10 +20,38 @@ export default function RealtimePage() {
   const [chipData, setChipData] = useState(null)
   const [fundFlowData, setFundFlowData] = useState(null)
   const [activeTab, setActiveTab] = useState('trend')
+  const [suggestions, setSuggestions] = useState([])
+  const displaySource = quote?.source || source
+
+  // Search by name/pinyin as well as code. The backend also resolves names,
+  // but showing the matching code makes the query unambiguous to the user.
+  useEffect(() => {
+    const value = code.trim()
+    const isCode = /^\d{6}(?:\.(?:SH|SZ|BJ))?$/i.test(value)
+    if (!value || isCode) {
+      setSuggestions([])
+      return undefined
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await getBroadcastSearch({ keyword: value })
+        setSuggestions(res?.code === 0 ? (res.data?.items || []) : [])
+      } catch (e) {
+        setSuggestions([])
+      }
+    }, 250)
+    return () => clearTimeout(timer)
+  }, [code])
 
   const fetchQuote = async () => {
-    if (!code) { toast.error('请输入股票代码'); return }
-    const cleanCode = code.replace(/\D/g, '')
+    const query = code.trim()
+    if (!query) { toast.error('请输入股票代码或股票名称'); return }
+    // Keep names intact. The backend resolves names and Tushare codes; only
+    // normalize the optional exchange suffix on an otherwise numeric code.
+    const cleanCode = /^\d{6}(?:\.(?:SH|SZ|BJ))?$/i.test(query)
+      ? query.split('.')[0]
+      : query
     setLoading(true)
     try {
       const res = await getStockQuote({ code: cleanCode, source })
@@ -34,7 +62,7 @@ export default function RealtimePage() {
           return [{ code: res.data.code, name: res.data.name }, ...filtered].slice(0, 10)
         })
         // Fetch trend chart and chip distribution in parallel
-        fetchTrendAndChip(cleanCode)
+        fetchTrendAndChip(res.data.code || cleanCode)
       } else {
         toast.error(res.message)
       }
@@ -49,7 +77,7 @@ export default function RealtimePage() {
       const [trendRes, chipRes, fundRes] = await Promise.all([
         getTrendChart({ code: stockCode }).catch(() => null),
         getChipDistribution({ code: stockCode }).catch(() => null),
-        getStockFundFlow({ code: stockCode }).catch(() => null),
+        getStockFundFlow({ code: stockCode, days: 120 }).catch(() => null),
       ])
       if (trendRes?.code === 0) setTrendData(trendRes.data)
       if (chipRes?.code === 0) setChipData(chipRes.data)
@@ -78,9 +106,25 @@ export default function RealtimePage() {
             <input
               type="text" value={code} onChange={e => setCode(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && fetchQuote()}
-              placeholder="输入股票代码 如 600519、000001、300750"
+              placeholder="输入股票代码或名称，如 600519、国泰海通"
               className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-gray-900 placeholder-gray-400 focus:border-[#513CC8] focus:ring-2 focus:ring-[#513CC8]/10 focus:outline-none text-sm"
             />
+            {suggestions.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg z-50 max-h-52 overflow-y-auto">
+                {suggestions.map(item => (
+                  <button
+                    key={item.ts_code || item.code}
+                    type="button"
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => { setCode(item.code); setSuggestions([]) }}
+                    className="w-full text-left px-3 py-2 text-xs hover:bg-purple-50 flex items-center justify-between"
+                  >
+                    <span><span className="font-medium text-gray-800">{item.name}</span> <span className="text-gray-400">{item.code}</span></span>
+                    <span className="text-gray-400 truncate ml-2">{item.industry || item.market || ''}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           
           {/* Source Tabs */}
@@ -127,8 +171,8 @@ export default function RealtimePage() {
                 <h2 className="text-2xl font-bold text-gray-900">{quote.name || '---'}</h2>
                 <span className="text-gray-400">{quote.code}</span>
                 <span className="px-2 py-0.5 rounded text-xs font-medium" 
-                  style={{ background: SOURCES.find(s => s.key === source)?.color + '10', color: SOURCES.find(s => s.key === source)?.color }}>
-                  {SOURCES.find(s => s.key === source)?.label}
+                  style={{ background: SOURCES.find(s => s.key === displaySource)?.color + '10', color: SOURCES.find(s => s.key === displaySource)?.color }}>
+                  {SOURCES.find(s => s.key === displaySource)?.label || displaySource}
                 </span>
               </div>
               <div className="flex items-baseline gap-2 mt-2">
@@ -144,7 +188,7 @@ export default function RealtimePage() {
               </div>
             </div>
             <div className="text-right text-xs text-gray-400">
-              <p>数据来源: {SOURCES.find(s => s.key === source)?.label}</p>
+              <p>数据来源: {SOURCES.find(s => s.key === displaySource)?.label || displaySource}</p>
               <p>日期: {quote.trade_date}</p>
               <p className="flex items-center gap-1 justify-end mt-1 text-[#513CC8]">
                 <Database size={12} /> 已存储至数据库
@@ -257,7 +301,8 @@ export default function RealtimePage() {
               <ResponsiveContainer width="100%" height={300}>
                 <BarChart data={chipData.klines || []}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" />
-                  <XAxis dataKey="date" tick={{fontSize: 10, fill: '#9CA3AF'}} tickFormatter={v => v?.slice(5)} />
+                  <XAxis dataKey="date" tick={{fontSize: 10, fill: '#9CA3AF'}} tickFormatter={v => v?.slice(5)}
+                    interval={Math.max(0, Math.floor((fundFlowData.klines?.length || 1) / 8))} />
                   <YAxis tick={{fontSize: 10, fill: '#9CA3AF'}} tickFormatter={v => typeof v === 'number' ? (v/10000).toFixed(0) + '万' : v} />
                   <Tooltip contentStyle={tooltipStyle}
                     formatter={(v, name) => {
@@ -297,7 +342,7 @@ export default function RealtimePage() {
             <div>
               <div className="flex items-center justify-between mb-2">
                 <h3 className="text-sm font-semibold text-gray-700">
-                  主力/散户资金分时（近5日） · 单位：元
+                  主力/散户资金趋势（近120个交易日） · 单位：元
                 </h3>
               </div>
               <ResponsiveContainer width="100%" height={300}>

@@ -3,6 +3,11 @@ import { getSystemSettings, updateSystemSettings, listAIProviders, createAIProvi
 import { Settings, Key, Database, Save, Eye, EyeOff, CheckCircle, AlertCircle, RefreshCw, Brain, Bell, Send, Mail, MessageSquare, Zap, Plus, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
+const isMaskedSecret = value => typeof value === 'string' && value.includes('****')
+
+const getSaveError = error =>
+  error?.response?.data?.message || error?.response?.data?.error || error?.message || '未知错误'
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('ai-model')
   const [loading, setLoading] = useState(true)
@@ -38,18 +43,23 @@ export default function SettingsPage() {
       ])
       if (settingsRes.status === 'fulfilled') {
         const data = settingsRes.value?.data?.data || settingsRes.value?.data || {}
-        const tToken = data.tushare_token || ''
-        setTushareToken(tToken)
+        const tToken = String(data.tushare_token || '')
+        // The server only returns a masked token after it has been saved.
+        // Never put that display value back into the editable input.
+        setTushareToken(isMaskedSecret(tToken) ? '' : tToken)
         setTushareTokenSaved(tToken)
+        const savedAPIKey = String(data.ai_decision_api_key || '')
         const dConfig = {
           base_url: data.ai_decision_base_url || '',
-          api_key: data.ai_decision_api_key || '',
+          api_key: isMaskedSecret(savedAPIKey) ? '' : savedAPIKey,
           model: data.ai_decision_model || ''
         }
         setDecisionConfig(dConfig)
-        setDecisionSaved(dConfig)
+        setDecisionSaved({ ...dConfig, api_key: savedAPIKey })
         setDecisionEdited(false)
         setTokenEdited(false)
+      } else {
+        toast.error(`读取系统设置失败：${getSaveError(settingsRes.reason)}`)
       }
       if (providersRes.status === 'fulfilled') {
         setAiProviders(providersRes.value?.data || [])
@@ -65,16 +75,17 @@ export default function SettingsPage() {
     try {
       const res = await getSystemSettings()
       const data = res?.data?.data || res?.data || {}
-      const tToken = data.tushare_token || ''
-      setTushareToken(tToken)
+      const tToken = String(data.tushare_token || '')
+      setTushareToken(isMaskedSecret(tToken) ? '' : tToken)
       setTushareTokenSaved(tToken)
+      const savedAPIKey = String(data.ai_decision_api_key || '')
       const dConfig = {
         base_url: data.ai_decision_base_url || '',
-        api_key: data.ai_decision_api_key || '',
+        api_key: isMaskedSecret(savedAPIKey) ? '' : savedAPIKey,
         model: data.ai_decision_model || ''
       }
       setDecisionConfig(dConfig)
-      setDecisionSaved(dConfig)
+      setDecisionSaved({ ...dConfig, api_key: savedAPIKey })
       setDecisionEdited(false)
       setTokenEdited(false)
     } catch (e) { /* silent */ }
@@ -88,35 +99,49 @@ export default function SettingsPage() {
   }
 
   const handleSaveToken = async () => {
+    const token = tushareToken.trim()
+    if (!token) {
+      toast.error(tushareTokenSaved ? '请输入新的 Tushare Token；留空表示保持原值' : '请输入 Tushare Token')
+      return
+    }
     setSaving(true)
     try {
-      await updateSystemSettings({ tushare_token: tushareToken.trim() })
+      const res = await updateSystemSettings({ tushare_token: token })
+      if (res?.code !== 0) throw new Error(res?.message || '保存失败')
       toast.success('Tushare Token 已保存')
       setTokenEdited(false)
       // Reload to get masked value from server
       await loadSettings()
     } catch (e) {
-      toast.error('保存失败')
+      toast.error(`保存失败：${getSaveError(e)}`)
+    } finally {
+      setSaving(false)
     }
-    setSaving(false)
   }
 
   const handleSaveDecisionAI = async () => {
     setAiSaving(true)
     try {
-      await updateSystemSettings({
+      const payload = {
         ai_decision_base_url: decisionConfig.base_url.trim(),
-        ai_decision_api_key: decisionConfig.api_key.trim(),
         ai_decision_model: decisionConfig.model.trim()
-      })
+      }
+      // A blank key means "keep the existing key" when one is already
+      // configured. This lets users change URL/model without overwriting the
+      // stored secret with an empty or masked value.
+      const apiKey = decisionConfig.api_key.trim()
+      if (apiKey || !decisionSaved.api_key) payload.ai_decision_api_key = apiKey
+      const res = await updateSystemSettings(payload)
+      if (res?.code !== 0) throw new Error(res?.message || '保存失败')
       toast.success('AI决策模型配置已保存')
       setDecisionEdited(false)
       // Reload to get masked value from server
       await loadSettings()
     } catch (e) {
-      toast.error('保存失败')
+      toast.error(`保存失败：${getSaveError(e)}`)
+    } finally {
+      setAiSaving(false)
     }
-    setAiSaving(false)
   }
 
   const handleUpdatePush = async (channel, data) => {
@@ -127,9 +152,10 @@ export default function SettingsPage() {
       // Reload push configs to reflect saved state
       await loadPushConfigs()
     } catch (e) {
-      toast.error('保存失败')
+      toast.error(`保存失败：${getSaveError(e)}`)
+    } finally {
+      setPushSaving(false)
     }
-    setPushSaving(false)
   }
 
   const handleTestPush = async (channel) => {
@@ -268,7 +294,7 @@ export default function SettingsPage() {
                     type={showAIKey ? 'text' : 'password'}
                     value={decisionConfig.api_key}
                     onChange={e => { setDecisionConfig(p => ({...p, api_key: e.target.value})); setDecisionEdited(true) }}
-                    placeholder="sk-..."
+                    placeholder={decisionSaved.api_key ? '已配置，留空保持不变；输入新 Key 可替换' : 'sk-...'}
                     className="w-full px-4 py-2.5 pr-10 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   />
                   <button onClick={() => setShowAIKey(!showAIKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
@@ -290,7 +316,7 @@ export default function SettingsPage() {
                 </button>
                 {decisionEdited && (
                   <button
-                    onClick={() => { setDecisionConfig(decisionSaved); setDecisionEdited(false) }}
+                    onClick={() => { setDecisionConfig({ ...decisionSaved, api_key: isMaskedSecret(decisionSaved.api_key) ? '' : decisionSaved.api_key }); setDecisionEdited(false) }}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition"
                   >
                     取消
@@ -404,7 +430,7 @@ export default function SettingsPage() {
                     type={showToken ? 'text' : 'password'}
                     value={tushareToken}
                     onChange={e => { setTushareToken(e.target.value); setTokenEdited(true) }}
-                    placeholder="请输入 Tushare Pro Token"
+                    placeholder={tushareTokenSaved ? '已配置，输入新 Token 可替换' : '请输入 Tushare Pro Token'}
                     className="w-full px-4 py-2.5 pr-10 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
                   />
                   <button onClick={() => setShowToken(!showToken)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
@@ -425,7 +451,7 @@ export default function SettingsPage() {
                 </button>
                 {tokenEdited && (
                   <button
-                    onClick={() => { setTushareToken(tushareTokenSaved); setTokenEdited(false) }}
+                    onClick={() => { setTushareToken(isMaskedSecret(tushareTokenSaved) ? '' : tushareTokenSaved); setTokenEdited(false) }}
                     className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 transition"
                   >
                     取消

@@ -46,12 +46,13 @@ export default function HotListPage() {
   const [gubaHasMore, setGubaHasMore] = useState(true)
   const gubaScrollRef = useRef(null)
 
-  const loadData = useCallback(async (p = page, sf = sortField, so = sortOrder, type = listType) => {
+  const loadData = useCallback(async (p = page, sf = sortField, so = sortOrder, type = listType, forceRefresh = false) => {
     setLoading(true)
     try {
       const res = await getMarketHotList({
         type, page: p, page_size: PAGE_SIZE,
-        sort_field: sf, sort_order: so
+        sort_field: sf, sort_order: so,
+        ...(forceRefresh ? { refresh: 'true' } : {})
       })
       if (res?.code === 0 && res.data) {
         setStocks(res.data.stocks || [])
@@ -85,7 +86,7 @@ export default function HotListPage() {
 
   const handleRefresh = async () => {
     setRefreshing(true)
-    await loadData(page, sortField, sortOrder, listType)
+    await loadData(page, sortField, sortOrder, listType, true)
     setRefreshing(false)
     toast.success('热榜数据已刷新')
   }
@@ -142,7 +143,7 @@ export default function HotListPage() {
   }, [])
 
   // Load Guba discussion data
-  const loadGubaData = useCallback(async (stockCode, pageNum = 1, append = false) => {
+  const loadGubaData = useCallback(async (stockCode, pageNum = 1, append = false, forceRefresh = false) => {
     if (!stockCode) return
     if (pageNum === 1) {
       setGubaLoading(true)
@@ -150,7 +151,7 @@ export default function HotListPage() {
       setGubaLoadingMore(true)
     }
     try {
-      const res = await getGubaDiscussion({ code: stockCode, page: pageNum, page_size: 20 })
+      const res = await getGubaDiscussion({ code: stockCode, page: pageNum, page_size: 20, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res?.code === 0 && res.data) {
         const newPosts = res.data.posts || []
         if (append) {
@@ -207,7 +208,7 @@ export default function HotListPage() {
     setGubaPosts([])
     setGubaPage(1)
     setGubaHasMore(true)
-    await loadGubaData(selectedStock.code, 1, false)
+    await loadGubaData(selectedStock.code, 1, false, true)
     toast.success('股吧讨论已刷新')
     if (gubaScrollRef.current) gubaScrollRef.current.scrollTop = 0
   }

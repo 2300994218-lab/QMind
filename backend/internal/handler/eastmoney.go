@@ -120,8 +120,10 @@ func parseTrendData(body []byte) gin.H {
 			if tStr, ok := t.(string); ok {
 				parts := strings.Split(tStr, ",")
 				if len(parts) >= 8 {
-					price, _ := strconv.ParseFloat(parts[1], 64)
-					avg, _ := strconv.ParseFloat(parts[2], 64)
+					// f52 is the minute open and comes back as 0.00 for every session
+					// before the latest one, so use f53 (last price) and f58 (均价).
+					price, _ := strconv.ParseFloat(parts[2], 64)
+					avg, _ := strconv.ParseFloat(parts[7], 64)
 					vol, _ := strconv.ParseFloat(parts[5], 64)
 					amt, _ := strconv.ParseFloat(parts[6], 64)
 					trends = append(trends, gin.H{
@@ -148,7 +150,7 @@ func parseTrendData(body []byte) gin.H {
 
 // GetChipDistribution returns daily K-line data combined with chip distribution visualization
 // This provides the candlestick chart + chip peak (筹码峰) data for the watchlist detail panel
-// When live API is unavailable, generates realistic simulation data based on the stock code
+// Source order: Eastmoney daily K-line -> Sina/Tencent fallback -> simulated data
 func (h *Handler) GetChipDistribution(c *gin.Context) {
 	code := c.Query("code")
 	if code == "" {
@@ -181,6 +183,7 @@ func (h *Handler) GetChipDistribution(c *gin.Context) {
 	var allHigh []float64
 	var allLow []float64
 	name := ""
+	dataSource := "东方财富K线"
 
 	if err == nil && len(klineData) > 0 {
 		var klineRaw map[string]interface{}
@@ -224,11 +227,38 @@ func (h *Handler) GetChipDistribution(c *gin.Context) {
 		}
 	}
 
-	// If no data from API, generate realistic simulation data
+	// push2his kline/get is TCP-blocked on some networks, so Sina/Tencent bars are
+	// tried before the simulated fallback.
 	if len(klines) == 0 {
-		log.Printf("[ChipDistribution] API unavailable for %s, generating simulation data", code)
-		klines, allClose, allOpen, allHigh, allLow, allVolume, name = generateSimulatedKLineData(code)
+		if bars, source, fbErr := fetchPeriodKLineFallback(code, "day", 120); fbErr == nil && len(bars) > 0 {
+			klines = bars
+			for _, b := range bars {
+				cl, _ := b["close"].(float64)
+				open, _ := b["open"].(float64)
+				high, _ := b["high"].(float64)
+				low, _ := b["low"].(float64)
+				vol, _ := b["volume"].(float64)
+				allClose = append(allClose, cl)
+				allOpen = append(allOpen, open)
+				allHigh = append(allHigh, high)
+				allLow = append(allLow, low)
+				allVolume = append(allVolume, vol)
+			}
+			dataSource = source
+			if name == "" {
+				if quotes, qErr := fetchQuoteViaUlist([]string{code}); qErr == nil && len(quotes) > 0 {
+					name = safeString(quotes[0], "name")
+				}
+			}
+		}
 	}
+
+	if len(klines) == 0 {
+		log.Printf("[ChipDistribution] API and fallback unavailable for %s, generating simulation data", code)
+		klines, allClose, allOpen, allHigh, allLow, allVolume, name = generateSimulatedKLineData(code)
+		dataSource = "模拟数据"
+	}
+	log.Printf("[ChipDistribution] %s 数据来源: %s, K线 %d 根", code, dataSource, len(klines))
 
 	// 2. Build chip distribution (筹码峰) from K-line data using triangle distribution
 	chips := buildChipDistribution(allClose, allVolume)
@@ -354,7 +384,7 @@ func generateSimulatedKLineData(code string) (klines []gin.H, closes, opens, hig
 		// Random walk with mean reversion toward base price
 		volatility := profile.basePrice * 0.025 // 2.5% daily volatility
 		meanReversion := (profile.basePrice - price) * 0.02
-		change := (nextRand() - 0.5) * 2 * volatility + meanReversion
+		change := (nextRand()-0.5)*2*volatility + meanReversion
 
 		open := price + (nextRand()-0.5)*volatility*0.3
 		cl := price + change
@@ -523,16 +553,35 @@ func calc90ChipRange(chips []gin.H, total float64) (float64, float64) {
 
 // ==================== Stock Fund Flow (个股资金流) ====================
 
-// GetStockFundFlow returns fund flow data for a stock from Eastmoney
+// GetStockFundFlow returns historical fund flow data for a stock.
+// Tushare is preferred because it supports a per-stock date range; Eastmoney
+// remains as a fallback for environments without a usable Tushare token.
+// Query parameter days controls the number of trading days returned (5-500,
+// default 120).
 func (h *Handler) GetStockFundFlow(c *gin.Context) {
-	code := c.Query("code")
+	code := strings.TrimSpace(c.Query("code"))
 	if code == "" {
 		response.BadRequest(c, "请提供股票代码")
 		return
 	}
 
+	days, _ := strconv.Atoi(c.DefaultQuery("days", "120"))
+	if days < 5 {
+		days = 5
+	}
+	if days > 500 {
+		days = 500
+	}
+
+	// Tushare moneyflow amounts are in 万元. The frontend charts use 元, so
+	// the helper normalizes the values before returning them.
+	if result, ok := fetchTushareStockFundFlow(code, days); ok {
+		response.Success(c, result)
+		return
+	}
+
 	secid := buildSecID(code)
-	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?secid=%s&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65&klt=101&lmt=5", secid)
+	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/stock/fflow/kline/get?secid=%s&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65&klt=101&lmt=%d", secid, days)
 
 	data, err := fetchEastmoneyAPI(url)
 	if err != nil {
@@ -579,7 +628,75 @@ func (h *Handler) GetStockFundFlow(c *gin.Context) {
 	response.Success(c, gin.H{
 		"code":   code,
 		"klines": klines,
+		"source": "eastmoney",
 	})
+}
+
+// fetchTushareStockFundFlow fetches daily moneyflow rows for one stock and
+// converts Tushare's amount unit (万元) to 元 for the existing frontend API.
+// It returns ok=false on API/permission errors so callers can use a fallback.
+func fetchTushareStockFundFlow(code string, days int) (gin.H, bool) {
+	tsCode := codeToTsCode(code)
+	endDate := time.Now().Format("20060102")
+	// Use a generous calendar window to obtain the requested number of trading
+	// days while keeping the response bounded. The API returns newest first.
+	startDate := time.Now().AddDate(0, 0, -(days*2 + 30)).Format("20060102")
+
+	resp, err := callTushareAPI("moneyflow", map[string]string{
+		"ts_code":    tsCode,
+		"start_date": startDate,
+		"end_date":   endDate,
+	}, "ts_code,trade_date,buy_sm_amount,sell_sm_amount,buy_md_amount,sell_md_amount,buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount,net_mf_amount")
+	if err != nil {
+		log.Printf("[StockFundFlow] Tushare unavailable for %s: %v", tsCode, err)
+		return nil, false
+	}
+
+	rows := tushareDataToMap(resp)
+	if len(rows) == 0 {
+		return nil, false
+	}
+
+	// Tushare returns newest first; charts are easier to read chronologically.
+	sort.Slice(rows, func(i, j int) bool {
+		return tsString(rows[i], "trade_date") < tsString(rows[j], "trade_date")
+	})
+	if len(rows) > days {
+		rows = rows[len(rows)-days:]
+	}
+
+	const wanToYuan = 10000.0
+	klines := make([]gin.H, 0, len(rows))
+	for _, row := range rows {
+		dateStr := tsString(row, "trade_date")
+		if len(dateStr) == 8 {
+			dateStr = dateStr[:4] + "-" + dateStr[4:6] + "-" + dateStr[6:]
+		}
+
+		superBig := (tsFloat(row, "buy_elg_amount") - tsFloat(row, "sell_elg_amount")) * wanToYuan
+		big := (tsFloat(row, "buy_lg_amount") - tsFloat(row, "sell_lg_amount")) * wanToYuan
+		mid := (tsFloat(row, "buy_md_amount") - tsFloat(row, "sell_md_amount")) * wanToYuan
+		small := (tsFloat(row, "buy_sm_amount") - tsFloat(row, "sell_sm_amount")) * wanToYuan
+
+		klines = append(klines, gin.H{
+			"date":       dateStr,
+			"main_net":   superBig + big,
+			"retail_net": mid + small,
+			"super_big":  superBig,
+			"big":        big,
+			"mid":        mid,
+			"small":      small,
+			"net_mf":     tsFloat(row, "net_mf_amount") * wanToYuan,
+		})
+	}
+
+	return gin.H{
+		"code":    code,
+		"ts_code": tsCode,
+		"klines":  klines,
+		"source":  "tushare",
+		"days":    len(klines),
+	}, true
 }
 
 // ==================== Watchlist CRUD ====================
@@ -718,7 +835,7 @@ func (h *Handler) GetConceptHeat(c *gin.Context) {
 		pageSize = 30
 	}
 
-	today := time.Now().Format("2006-01-02")
+	today := currentSessionDate()
 
 	// Try fetching real-time data first
 	allConcepts := fetchAllSectorOrConcept("concept")
@@ -774,6 +891,13 @@ func fetchAllSectorOrConcept(category string) []gin.H {
 	items = fetchSectorOrConceptFromAkShare(category)
 	if len(items) > 0 {
 		log.Printf("[SectorHeat] AkShare fallback returned %d items for %s", len(items), category)
+		return items
+	}
+
+	// Fallback: Sina board lists (fund-flow columns stay empty, Sina has no such field)
+	items = fetchSinaBoards(category)
+	if len(items) > 0 {
+		log.Printf("[SectorHeat] 新浪板块兜底返回 %d 项 (%s)", len(items), category)
 		return items
 	}
 
@@ -1138,7 +1262,70 @@ func fetchLimitStocksFromClist(limitType string) []gin.H {
 		}
 	}
 
+	if len(allStocks) == 0 {
+		allStocks = emLimitStocksFromSina(limitType)
+	}
+
 	return allStocks
+}
+
+// emLimitStocksFromSina rebuilds the clist row shape from the cached Sina snapshot
+// because api/qt/clist/get resets the connection on this network.
+func emLimitStocksFromSina(limitType string) []gin.H {
+	stocks, err := sinaMarketSnapshot(3 * time.Minute)
+	if err != nil {
+		log.Printf("[LimitClist] 新浪快照获取失败: %v", err)
+		return nil
+	}
+
+	isDown := limitType == "down"
+	matched := []dailyStock{}
+	for _, s := range stocks {
+		pure := extractPureCode(s.Code)
+		if !strings.HasPrefix(pure, "60") && !strings.HasPrefix(pure, "00") {
+			continue
+		}
+		if s.PreClose <= 0 || s.Close <= 0 {
+			continue
+		}
+		if isDown {
+			if s.Close > roundTo2(s.PreClose*0.9)+0.001 {
+				continue
+			}
+		} else if s.Close < roundTo2(s.PreClose*1.1)-0.001 {
+			continue
+		}
+		matched = append(matched, s)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		pi, pj := math.Abs(matched[i].PctChg), math.Abs(matched[j].PctChg)
+		if pi != pj {
+			return pi > pj
+		}
+		return matched[i].Amount > matched[j].Amount
+	})
+	if len(matched) > 100 {
+		matched = matched[:100]
+	}
+
+	rows := make([]gin.H, 0, len(matched))
+	for _, s := range matched {
+		rows = append(rows, gin.H{
+			"code":        extractPureCode(s.Code),
+			"name":        s.Name,
+			"price":       s.Close,
+			"open":        s.Open,
+			"pre_close":   s.PreClose,
+			"change_pct":  s.PctChg,
+			"fund_amount": s.Amount, // 新浪成交额已是亿，与 f62/1e8 同单位
+			"concept":     s.Concept,
+			"board_count": 0,
+		})
+	}
+
+	log.Printf("[LimitClist] 新浪快照兜底 %s: %d 只", limitType, len(rows))
+	return rows
 }
 
 // getLimitThreshold returns the daily limit threshold (%) for a stock based on its code and name.
@@ -1283,7 +1470,7 @@ func (h *Handler) GetRealTimeStats(c *gin.Context) {
 
 	// Persist real-time stats to DB in background
 	go func() {
-		today := time.Now().Format("2006-01-02")
+		today := currentSessionDate()
 		sentiment := model.MarketSentiment{
 			Score:          math.Round(sentimentScore*10) / 10,
 			LimitUpCount:   limitUpCount,
@@ -1716,8 +1903,8 @@ func fetchAndGroupByHotMoney(date string, hotMoneySeats map[string]string) []gin
 
 		// BUY_AMT and SELL_AMT are in 万元(ten-thousands), NET is in 元(yuan)
 		// Convert all to 万元 for consistency
-		buyAmt := safeFloat(seat, "BUY_AMT")   // 万元
-		sellAmt := safeFloat(seat, "SELL_AMT")  // 万元
+		buyAmt := safeFloat(seat, "BUY_AMT")     // 万元
+		sellAmt := safeFloat(seat, "SELL_AMT")   // 万元
 		netAmt := safeFloat(seat, "NET") / 10000 // 元 -> 万元
 
 		trader.TotalBuy += buyAmt
@@ -1728,9 +1915,9 @@ func fetchAndGroupByHotMoney(date string, hotMoneySeats map[string]string) []gin
 			"seat":       seatName,
 			"code":       safeString(seat, "SECURITY_CODE"),
 			"name":       safeString(seat, "SECURITY_NAME_ABBR"),
-			"buy_amt":    buyAmt,   // 万元
-			"sell_amt":   sellAmt,  // 万元
-			"net_amt":    netAmt,   // 万元
+			"buy_amt":    buyAmt,  // 万元
+			"sell_amt":   sellAmt, // 万元
+			"net_amt":    netAmt,  // 万元
 			"direction":  safeString(seat, "TRADE_DIRECTION"),
 			"change_pct": safeFloat(seat, "CHANGE_RATE"),
 			"reason":     safeString(seat, "EXPLANATION"),
@@ -1783,193 +1970,193 @@ func getHotMoneySeatsMap() map[string]string {
 	return map[string]string{
 		// ========== 顶级游资 ==========
 		// 赵老哥 - 8年一万倍传奇，A股最知名游资之一
-		"华泰证券上海武定路":             "赵老哥",
-		"华泰证券上海共和新路":            "赵老哥",
-		"华泰证券股份有限公司上海武定路":       "赵老哥",
-		"华泰证券股份有限公司上海共和新路":      "赵老哥",
-		"银泰证券上海嘉善路":             "赵老哥",
-		"银泰证券有限责任公司上海嘉善路":       "赵老哥",
-		"湘财证券上海陆家嘴":             "赵老哥",
-		"湘财证券股份有限公司上海陆家嘴":       "赵老哥",
-		"浙商证券绍兴分公司":             "赵老哥",
-		"华泰证券浙江分公司":             "赵老哥",
-		"中国银河证券绍兴":              "赵老哥",
-		"中国银河证券北京阜成路":           "赵老哥",
+		"华泰证券上海武定路":        "赵老哥",
+		"华泰证券上海共和新路":       "赵老哥",
+		"华泰证券股份有限公司上海武定路":  "赵老哥",
+		"华泰证券股份有限公司上海共和新路": "赵老哥",
+		"银泰证券上海嘉善路":        "赵老哥",
+		"银泰证券有限责任公司上海嘉善路":  "赵老哥",
+		"湘财证券上海陆家嘴":        "赵老哥",
+		"湘财证券股份有限公司上海陆家嘴":  "赵老哥",
+		"浙商证券绍兴分公司":        "赵老哥",
+		"华泰证券浙江分公司":        "赵老哥",
+		"中国银河证券绍兴":         "赵老哥",
+		"中国银河证券北京阜成路":      "赵老哥",
 		// 陈晓群(孙哥) - 超级大户，擅长大资金运作
-		"中信证券上海溧阳路":             "陈晓群(孙哥)",
-		"中信证券杭州四季路":             "陈晓群(孙哥)",
-		"中信证券股份有限公司上海溧阳路":       "陈晓群(孙哥)",
-		"中信证券股份有限公司杭州四季路":       "陈晓群(孙哥)",
+		"中信证券上海溧阳路":       "陈晓群(孙哥)",
+		"中信证券杭州四季路":       "陈晓群(孙哥)",
+		"中信证券股份有限公司上海溧阳路": "陈晓群(孙哥)",
+		"中信证券股份有限公司杭州四季路": "陈晓群(孙哥)",
 		// 桑田路 - 知名一线游资
-		"申万宏源上海桑田路":             "桑田路",
-		"申万宏源桑田路":               "桑田路",
-		"申万宏源证券有限公司上海桑田路":       "桑田路",
+		"申万宏源上海桑田路":       "桑田路",
+		"申万宏源桑田路":         "桑田路",
+		"申万宏源证券有限公司上海桑田路": "桑田路",
 		// 佛山无影脚 - 深圳系游资代表
-		"国泰海通深圳益田路":             "佛山无影脚",
-		"国泰君安深圳益田路":             "佛山无影脚",
-		"国泰海通证券深圳益田路":           "佛山无影脚",
-		"国泰君安证券股份有限公司深圳益田路":     "佛山无影脚",
+		"国泰海通深圳益田路":         "佛山无影脚",
+		"国泰君安深圳益田路":         "佛山无影脚",
+		"国泰海通证券深圳益田路":       "佛山无影脚",
+		"国泰君安证券股份有限公司深圳益田路": "佛山无影脚",
 		// 炒股养家 - 游资教父级人物
-		"国信证券深圳泰然九路":            "炒股养家",
-		"国信证券泰然九路":              "炒股养家",
-		"华鑫证券马鞍山分公司":            "炒股养家",
-		"华鑫证券有限责任公司马鞍山分公司":      "炒股养家",
-		"华鑫证券西安南二环":             "炒股养家",
-		"华鑫证券有限责任公司西安南二环":       "炒股养家",
-		"华鑫证券珠海海滨南路":            "炒股养家",
-		"华鑫证券有限责任公司珠海海滨南路":      "炒股养家",
-		"华鑫证券南昌分公司":             "炒股养家",
-		"华鑫证券有限责任公司南昌分公司":       "炒股养家",
-		"华鑫证券北京光华路":             "炒股养家",
-		"华鑫证券有限责任公司北京光华路":       "炒股养家",
-		"华鑫证券上海莘庄":              "炒股养家",
-		"华鑫证券有限责任公司上海莘庄":        "炒股养家",
-		"华鑫证券上海茅台路":             "炒股养家",
-		"华鑫证券有限责任公司上海茅台路":       "炒股养家",
-		"华鑫证券上海红宝石路":            "炒股养家",
-		"华鑫证券有限责任公司上海红宝石路":      "炒股养家",
-		"华鑫证券上海松江":              "炒股养家",
-		"华鑫证券有限责任公司上海松江":        "炒股养家",
-		"华鑫证券上海宛平南路":            "炒股养家",
-		"华鑫证券有限责任公司上海宛平南路":      "炒股养家",
-		"华创证券上海大连路":             "炒股养家",
-		"华创证券有限责任公司上海大连路":       "炒股养家",
-		"浙商证券绍兴解放北路":            "炒股养家",
-		"浙商证券股份有限公司绍兴解放北路":      "炒股养家",
+		"国信证券深圳泰然九路":       "炒股养家",
+		"国信证券泰然九路":         "炒股养家",
+		"华鑫证券马鞍山分公司":       "炒股养家",
+		"华鑫证券有限责任公司马鞍山分公司": "炒股养家",
+		"华鑫证券西安南二环":        "炒股养家",
+		"华鑫证券有限责任公司西安南二环":  "炒股养家",
+		"华鑫证券珠海海滨南路":       "炒股养家",
+		"华鑫证券有限责任公司珠海海滨南路": "炒股养家",
+		"华鑫证券南昌分公司":        "炒股养家",
+		"华鑫证券有限责任公司南昌分公司":  "炒股养家",
+		"华鑫证券北京光华路":        "炒股养家",
+		"华鑫证券有限责任公司北京光华路":  "炒股养家",
+		"华鑫证券上海莘庄":         "炒股养家",
+		"华鑫证券有限责任公司上海莘庄":   "炒股养家",
+		"华鑫证券上海茅台路":        "炒股养家",
+		"华鑫证券有限责任公司上海茅台路":  "炒股养家",
+		"华鑫证券上海红宝石路":       "炒股养家",
+		"华鑫证券有限责任公司上海红宝石路": "炒股养家",
+		"华鑫证券上海松江":         "炒股养家",
+		"华鑫证券有限责任公司上海松江":   "炒股养家",
+		"华鑫证券上海宛平南路":       "炒股养家",
+		"华鑫证券有限责任公司上海宛平南路": "炒股养家",
+		"华创证券上海大连路":        "炒股养家",
+		"华创证券有限责任公司上海大连路":  "炒股养家",
+		"浙商证券绍兴解放北路":       "炒股养家",
+		"浙商证券股份有限公司绍兴解放北路": "炒股养家",
 		// 作手新一 - 涨停板战法代表
-		"国泰海通上海江苏路":             "作手新一",
-		"国泰君安上海江苏路":             "作手新一",
-		"国泰海通证券上海江苏路":           "作手新一",
-		"国泰君安证券股份有限公司上海江苏路":     "作手新一",
+		"国泰海通上海江苏路":         "作手新一",
+		"国泰君安上海江苏路":         "作手新一",
+		"国泰海通证券上海江苏路":       "作手新一",
+		"国泰君安证券股份有限公司上海江苏路": "作手新一",
 		// 章盟主 - 杭州系游资代表
-		"中信证券杭州延安路":             "章盟主",
-		"中信建投杭州延安路":             "章盟主",
-		"中信证券股份有限公司杭州延安路":       "章盟主",
-		"中信证券股份有限公司杭州富春路":       "章盟主",
-		"海通证券上海徐汇区建国西路":         "章盟主",
-		"海通证券股份有限公司上海徐汇区建国西路":   "章盟主",
-		"方正证券杭州延安路":             "章盟主",
-		"方正证券股份有限公司杭州延安路":       "章盟主",
-		"国泰君安宁波广福街":             "章盟主",
-		"国泰君安证券股份有限公司宁波广福街":     "章盟主",
+		"中信证券杭州延安路":           "章盟主",
+		"中信建投杭州延安路":           "章盟主",
+		"中信证券股份有限公司杭州延安路":     "章盟主",
+		"中信证券股份有限公司杭州富春路":     "章盟主",
+		"海通证券上海徐汇区建国西路":       "章盟主",
+		"海通证券股份有限公司上海徐汇区建国西路": "章盟主",
+		"方正证券杭州延安路":           "章盟主",
+		"方正证券股份有限公司杭州延安路":     "章盟主",
+		"国泰君安宁波广福街":           "章盟主",
+		"国泰君安证券股份有限公司宁波广福街":   "章盟主",
 		// 方新侠
-		"兴业证券陕西分公司":             "方新侠",
-		"兴业证券股份有限公司陕西分公司":       "方新侠",
-		"中信证券西安朱雀大街":            "方新侠",
-		"中信证券股份有限公司西安朱雀大街":      "方新侠",
-		"华鑫证券上海分公司":             "方新侠",
-		"华鑫证券有限责任公司上海分公司":       "方新侠",
+		"兴业证券陕西分公司":        "方新侠",
+		"兴业证券股份有限公司陕西分公司":  "方新侠",
+		"中信证券西安朱雀大街":       "方新侠",
+		"中信证券股份有限公司西安朱雀大街": "方新侠",
+		"华鑫证券上海分公司":        "方新侠",
+		"华鑫证券有限责任公司上海分公司":  "方新侠",
 		// 欢乐海岸 - 深圳知名游资
-		"华泰证券深圳益田路荣超商务":         "欢乐海岸",
-		"招商证券深圳蛇口":              "欢乐海岸",
-		"华泰证券深圳益田路":             "欢乐海岸",
-		"华泰证券深圳科苑南路华润大厦":        "欢乐海岸",
-		"华泰证券股份有限公司深圳科苑南路华润大厦":  "欢乐海岸",
-		"华泰证券深圳深南大道基金大厦":        "欢乐海岸",
-		"华泰证券股份有限公司深圳深南大道基金大厦":  "欢乐海岸",
-		"华泰证券深圳分公司":             "欢乐海岸",
-		"华泰证券股份有限公司深圳分公司":       "欢乐海岸",
-		"中泰证券深圳科苑南路":            "欢乐海岸",
-		"中泰证券股份有限公司深圳科苑南路":      "欢乐海岸",
-		"中泰证券深圳宝源南路":            "欢乐海岸",
-		"中泰证券股份有限公司深圳宝源南路":      "欢乐海岸",
-		"中泰证券深圳分公司":             "欢乐海岸",
-		"中泰证券股份有限公司深圳分公司":       "欢乐海岸",
-		"中信证券深圳科技园":             "欢乐海岸",
-		"中信证券股份有限公司深圳科技园":       "欢乐海岸",
-		"中信证券深圳后海":              "欢乐海岸",
-		"中信证券股份有限公司深圳后海":        "欢乐海岸",
-		"中信证券深圳分公司":             "欢乐海岸",
-		"中信证券股份有限公司深圳分公司":       "欢乐海岸",
-		"第一创业深圳福华一路":            "欢乐海岸",
-		"第一创业证券股份有限公司深圳福华一路总部":  "欢乐海岸",
-		"招商证券深圳深南大道车公庙":         "欢乐海岸",
-		"招商证券股份有限公司深圳深南大道车公庙":   "欢乐海岸",
-		"广发证券深圳福华一路":            "欢乐海岸",
-		"广发证券股份有限公司深圳福华一路":      "欢乐海岸",
-		"平安证券深圳金田路":             "欢乐海岸",
-		"平安证券股份有限公司深圳金田路":       "欢乐海岸",
-		"国金证券深圳湾一号":             "欢乐海岸",
-		"国金证券股份有限公司深圳湾一号":       "欢乐海岸",
-		"中国中金财富深圳宝安兴华路":         "欢乐海岸",
-		"中国中金财富证券有限公司深圳宝安兴华路":   "欢乐海岸",
+		"华泰证券深圳益田路荣超商务":        "欢乐海岸",
+		"招商证券深圳蛇口":             "欢乐海岸",
+		"华泰证券深圳益田路":            "欢乐海岸",
+		"华泰证券深圳科苑南路华润大厦":       "欢乐海岸",
+		"华泰证券股份有限公司深圳科苑南路华润大厦": "欢乐海岸",
+		"华泰证券深圳深南大道基金大厦":       "欢乐海岸",
+		"华泰证券股份有限公司深圳深南大道基金大厦": "欢乐海岸",
+		"华泰证券深圳分公司":            "欢乐海岸",
+		"华泰证券股份有限公司深圳分公司":      "欢乐海岸",
+		"中泰证券深圳科苑南路":           "欢乐海岸",
+		"中泰证券股份有限公司深圳科苑南路":     "欢乐海岸",
+		"中泰证券深圳宝源南路":           "欢乐海岸",
+		"中泰证券股份有限公司深圳宝源南路":     "欢乐海岸",
+		"中泰证券深圳分公司":            "欢乐海岸",
+		"中泰证券股份有限公司深圳分公司":      "欢乐海岸",
+		"中信证券深圳科技园":            "欢乐海岸",
+		"中信证券股份有限公司深圳科技园":      "欢乐海岸",
+		"中信证券深圳后海":             "欢乐海岸",
+		"中信证券股份有限公司深圳后海":       "欢乐海岸",
+		"中信证券深圳分公司":            "欢乐海岸",
+		"中信证券股份有限公司深圳分公司":      "欢乐海岸",
+		"第一创业深圳福华一路":           "欢乐海岸",
+		"第一创业证券股份有限公司深圳福华一路总部": "欢乐海岸",
+		"招商证券深圳深南大道车公庙":        "欢乐海岸",
+		"招商证券股份有限公司深圳深南大道车公庙":  "欢乐海岸",
+		"广发证券深圳福华一路":           "欢乐海岸",
+		"广发证券股份有限公司深圳福华一路":     "欢乐海岸",
+		"平安证券深圳金田路":            "欢乐海岸",
+		"平安证券股份有限公司深圳金田路":      "欢乐海岸",
+		"国金证券深圳湾一号":            "欢乐海岸",
+		"国金证券股份有限公司深圳湾一号":      "欢乐海岸",
+		"中国中金财富深圳宝安兴华路":        "欢乐海岸",
+		"中国中金财富证券有限公司深圳宝安兴华路":  "欢乐海岸",
 		// 金田路 - 深圳游资
-		"光大证券深圳金田路":             "金田路",
-		"光大证券股份有限公司深圳金田路":       "金田路",
-		"中天证券深圳分公司":             "金田路",
-		"中天证券股份有限公司深圳分公司":       "金田路",
+		"光大证券深圳金田路":       "金田路",
+		"光大证券股份有限公司深圳金田路": "金田路",
+		"中天证券深圳分公司":       "金田路",
+		"中天证券股份有限公司深圳分公司": "金田路",
 		// 益田路
-		"华鑫证券深圳益田路":             "益田路",
-		"华鑫证券有限责任公司深圳益田路":       "益田路",
+		"华鑫证券深圳益田路":       "益田路",
+		"华鑫证券有限责任公司深圳益田路": "益田路",
 		// 隐秀路
-		"华鑫证券杭州隐秀路":             "隐秀路",
-		"华鑫证券有限责任公司杭州隐秀路":       "隐秀路",
+		"华鑫证券杭州隐秀路":       "隐秀路",
+		"华鑫证券有限责任公司杭州隐秀路": "隐秀路",
 		// 飞云江路
-		"华鑫证券杭州飞云江路":            "飞云江路",
-		"华鑫证券有限责任公司杭州飞云江路":      "飞云江路",
+		"华鑫证券杭州飞云江路":       "飞云江路",
+		"华鑫证券有限责任公司杭州飞云江路": "飞云江路",
 		// 瑞鹤仙
-		"诚通证券宜昌东山大道":            "瑞鹤仙",
-		"诚通证券股份有限公司宜昌东山大道":      "瑞鹤仙",
-		"中国银河证券宜昌新世纪":           "瑞鹤仙",
-		"中国银河证券股份有限公司宜昌新世纪":     "瑞鹤仙",
-		"中信建投宜昌解放路":             "瑞鹤仙",
-		"中信建投证券股份有限公司宜昌解放路":     "瑞鹤仙",
+		"诚通证券宜昌东山大道":        "瑞鹤仙",
+		"诚通证券股份有限公司宜昌东山大道":  "瑞鹤仙",
+		"中国银河证券宜昌新世纪":       "瑞鹤仙",
+		"中国银河证券股份有限公司宜昌新世纪": "瑞鹤仙",
+		"中信建投宜昌解放路":         "瑞鹤仙",
+		"中信建投证券股份有限公司宜昌解放路": "瑞鹤仙",
 		// 陈小群
-		"中国银河证券大连黄河路":           "陈小群",
-		"中国银河证券股份有限公司大连黄河路":     "陈小群",
-		"中国银河证券大连金马路":           "陈小群",
-		"中国银河证券股份有限公司大连金马路":     "陈小群",
+		"中国银河证券大连黄河路":       "陈小群",
+		"中国银河证券股份有限公司大连黄河路": "陈小群",
+		"中国银河证券大连金马路":       "陈小群",
+		"中国银河证券股份有限公司大连金马路": "陈小群",
 		// 量化打板
-		"华鑫证券有限责任公司上海分公司量化":      "量化打板",
-		"华创证券上海第二分公司":           "量化打板",
-		"华创证券有限责任公司上海第二分公司":     "量化打板",
+		"华鑫证券有限责任公司上海分公司量化": "量化打板",
+		"华创证券上海第二分公司":       "量化打板",
+		"华创证券有限责任公司上海第二分公司": "量化打板",
 		// 涅盘重升
-		"长城证券资阳蜀乡大道":            "涅盘重升",
-		"长城证券股份有限公司资阳蜀乡大道":      "涅盘重升",
-		"上海证券苏州太湖西路":            "涅盘重升",
-		"上海证券有限责任公司苏州太湖西路":      "涅盘重升",
+		"长城证券资阳蜀乡大道":       "涅盘重升",
+		"长城证券股份有限公司资阳蜀乡大道": "涅盘重升",
+		"上海证券苏州太湖西路":       "涅盘重升",
+		"上海证券有限责任公司苏州太湖西路": "涅盘重升",
 		// 歌神
-		"兴业证券杭州体育场路":            "歌神",
-		"兴业证券股份有限公司杭州体育场路":      "歌神",
-		"中国中金财富杭州江河汇":           "歌神",
-		"中国中金财富证券有限公司杭州江河汇":     "歌神",
-		"中信证券杭州金城路":             "歌神",
-		"中信证券股份有限公司杭州金城路":       "歌神",
+		"兴业证券杭州体育场路":        "歌神",
+		"兴业证券股份有限公司杭州体育场路":  "歌神",
+		"中国中金财富杭州江河汇":       "歌神",
+		"中国中金财富证券有限公司杭州江河汇": "歌神",
+		"中信证券杭州金城路":         "歌神",
+		"中信证券股份有限公司杭州金城路":   "歌神",
 		// 西湖国贸
-		"财信证券杭州西湖国贸中心":          "西湖国贸",
-		"财信证券股份有限公司杭州西湖国贸中心":    "西湖国贸",
+		"财信证券杭州西湖国贸中心":       "西湖国贸",
+		"财信证券股份有限公司杭州西湖国贸中心": "西湖国贸",
 		// 流沙河
-		"中信证券北京远大路":             "流沙河",
-		"中信证券股份有限公司北京远大路":       "流沙河",
+		"中信证券北京远大路":       "流沙河",
+		"中信证券股份有限公司北京远大路": "流沙河",
 		// 竞价抢筹
-		"中国银河证券北京中关村大街":         "竞价抢筹",
-		"中国银河证券股份有限公司北京中关村大街":   "竞价抢筹",
+		"中国银河证券北京中关村大街":       "竞价抢筹",
+		"中国银河证券股份有限公司北京中关村大街": "竞价抢筹",
 		// 申港广东分
-		"申港证券广东分公司":             "申港广东分",
-		"申港证券股份有限公司广东分公司":       "申港广东分",
+		"申港证券广东分公司":       "申港广东分",
+		"申港证券股份有限公司广东分公司": "申港广东分",
 		// 粉葛
-		"东亚前海证券深圳分公司":           "粉葛",
-		"东亚前海证券有限责任公司深圳分公司":     "粉葛",
+		"东亚前海证券深圳分公司":       "粉葛",
+		"东亚前海证券有限责任公司深圳分公司": "粉葛",
 		// 独股一剑
-		"华泰证券北京月坛南街":            "独股一剑",
-		"华泰证券股份有限公司北京月坛南街":      "独股一剑",
+		"华泰证券北京月坛南街":       "独股一剑",
+		"华泰证券股份有限公司北京月坛南街": "独股一剑",
 		// 招商深南东
-		"招商证券深圳深南东路":            "招商深南东",
-		"招商证券股份有限公司深圳深南东路":      "招商深南东",
+		"招商证券深圳深南东路":       "招商深南东",
+		"招商证券股份有限公司深圳深南东路": "招商深南东",
 		// 首板挖掘
-		"申万宏源北京劲松九区":            "首板挖掘",
-		"申万宏源证券有限公司北京劲松九区":      "首板挖掘",
-		"湘财证券武汉友谊大道":            "首板挖掘",
-		"湘财证券股份有限公司武汉友谊大道":      "首板挖掘",
-		"国都证券北京阜外大街":            "首板挖掘",
-		"国都证券股份有限公司北京阜外大街":      "首板挖掘",
-		"华鑫证券泉州宝洲路":             "首板挖掘",
-		"华鑫证券有限责任公司泉州宝洲路":       "首板挖掘",
-		"华鑫证券江苏分公司":             "首板挖掘",
-		"华鑫证券有限责任公司江苏分公司":       "首板挖掘",
+		"申万宏源北京劲松九区":       "首板挖掘",
+		"申万宏源证券有限公司北京劲松九区": "首板挖掘",
+		"湘财证券武汉友谊大道":       "首板挖掘",
+		"湘财证券股份有限公司武汉友谊大道": "首板挖掘",
+		"国都证券北京阜外大街":       "首板挖掘",
+		"国都证券股份有限公司北京阜外大街": "首板挖掘",
+		"华鑫证券泉州宝洲路":        "首板挖掘",
+		"华鑫证券有限责任公司泉州宝洲路":  "首板挖掘",
+		"华鑫证券江苏分公司":        "首板挖掘",
+		"华鑫证券有限责任公司江苏分公司":  "首板挖掘",
 		// 湖里大道
-		"兴业证券厦门湖里大道":            "湖里大道",
-		"兴业证券股份有限公司厦门湖里大道":      "湖里大道",
+		"兴业证券厦门湖里大道":       "湖里大道",
+		"兴业证券股份有限公司厦门湖里大道": "湖里大道",
 		// 湖州劳动路
 		"华鑫证券湖州劳动路浙北金融中心":       "湖州劳动路",
 		"华鑫证券有限责任公司湖州劳动路浙北金融中心": "湖州劳动路",
@@ -1978,10 +2165,10 @@ func getHotMoneySeatsMap() map[string]string {
 		"华鑫证券南京清凉门大街":           "湖州劳动路",
 		"华鑫证券有限责任公司南京清凉门大街":     "湖州劳动路",
 		// 涪陵广场路
-		"方正证券重庆金开大道":            "涪陵广场路",
-		"方正证券股份有限公司重庆金开大道":      "涪陵广场路",
-		"中信建投重庆涪陵":              "涪陵广场路",
-		"中信建投证券股份有限公司重庆涪陵":      "涪陵广场路",
+		"方正证券重庆金开大道":       "涪陵广场路",
+		"方正证券股份有限公司重庆金开大道": "涪陵广场路",
+		"中信建投重庆涪陵":         "涪陵广场路",
+		"中信建投证券股份有限公司重庆涪陵": "涪陵广场路",
 		// 红岭路
 		"平安证券深圳蛇口招商路招商大厦":       "红岭路",
 		"平安证券股份有限公司深圳蛇口招商路招商大厦": "红岭路",
@@ -1990,206 +2177,206 @@ func getHotMoneySeatsMap() map[string]string {
 		"华泰证券深圳彩田路":             "红岭路",
 		"华泰证券股份有限公司深圳彩田路":       "红岭路",
 		// 玉兰路
-		"东莞证券南京分公司":             "玉兰路",
-		"东莞证券股份有限公司南京分公司":       "玉兰路",
+		"东莞证券南京分公司":       "玉兰路",
+		"东莞证券股份有限公司南京分公司": "玉兰路",
 		// 毛老板
-		"申万宏源深圳金田路":             "毛老板",
-		"申万宏源证券有限公司深圳金田路":       "毛老板",
-		"广发证券上海东方路":             "毛老板",
-		"广发证券股份有限公司上海东方路":       "毛老板",
-		"国泰君安北京光华路":             "毛老板",
-		"国泰君安证券股份有限公司北京光华路":     "毛老板",
-		"万和证券成都通盈街":             "毛老板",
-		"万和证券股份有限公司成都通盈街":       "毛老板",
+		"申万宏源深圳金田路":         "毛老板",
+		"申万宏源证券有限公司深圳金田路":   "毛老板",
+		"广发证券上海东方路":         "毛老板",
+		"广发证券股份有限公司上海东方路":   "毛老板",
+		"国泰君安北京光华路":         "毛老板",
+		"国泰君安证券股份有限公司北京光华路": "毛老板",
+		"万和证券成都通盈街":         "毛老板",
+		"万和证券股份有限公司成都通盈街":   "毛老板",
 
 		// ========== 知名团队/帮派 ==========
 		// 成都帮(成都系) - 西南游资团体
-		"华西证券成都高新":              "成都帮",
-		"国盛证券成都二环路":             "成都帮",
-		"华鑫证券成都二环路":             "成都帮",
-		"中信证券成都交子大道":            "成都帮",
-		"华西证券成都":               "成都帮",
-		"国金证券成都":               "成都帮",
-		"宏信证券成都紫竹北街":            "成都系",
-		"宏信证券有限责任公司成都紫竹北街":      "成都系",
-		"国融证券青岛分公司":             "成都系",
-		"国融证券股份有限公司青岛分公司":       "成都系",
-		"国联证券成都锦城大道":            "成都系",
-		"国联证券股份有限公司成都锦城大道":      "成都系",
-		"国泰君安成都天府二街":            "成都系",
-		"国泰君安证券股份有限公司成都天府二街":    "成都系",
-		"国泰君安成都北一环路":            "成都系",
-		"国泰君安证券股份有限公司成都北一环路":    "成都系",
-		"华泰证券成都天府广场":            "成都系",
-		"华泰证券股份有限公司成都天府广场":      "成都系",
+		"华西证券成都高新":           "成都帮",
+		"国盛证券成都二环路":          "成都帮",
+		"华鑫证券成都二环路":          "成都帮",
+		"中信证券成都交子大道":         "成都帮",
+		"华西证券成都":             "成都帮",
+		"国金证券成都":             "成都帮",
+		"宏信证券成都紫竹北街":         "成都系",
+		"宏信证券有限责任公司成都紫竹北街":   "成都系",
+		"国融证券青岛分公司":          "成都系",
+		"国融证券股份有限公司青岛分公司":    "成都系",
+		"国联证券成都锦城大道":         "成都系",
+		"国联证券股份有限公司成都锦城大道":   "成都系",
+		"国泰君安成都天府二街":         "成都系",
+		"国泰君安证券股份有限公司成都天府二街": "成都系",
+		"国泰君安成都北一环路":         "成都系",
+		"国泰君安证券股份有限公司成都北一环路": "成都系",
+		"华泰证券成都天府广场":         "成都系",
+		"华泰证券股份有限公司成都天府广场":   "成都系",
 		// 拉萨帮(小鳄鱼) - 东方财富系拉萨席位
-		"东方财富拉萨团结路":             "拉萨帮",
-		"东方财富拉萨东环路":             "拉萨帮",
-		"东方财富拉萨东环路第二":           "拉萨帮",
-		"东方财富拉萨金融城南环路":          "拉萨帮",
-		"东方财富拉萨金珠西路":            "拉萨帮",
-		"东方财富证券拉萨":              "拉萨帮",
-		"东方财富证券股份有限公司拉萨团结路":     "拉萨帮",
-		"东方财富证券股份有限公司拉萨东环路":     "拉萨帮",
-		"东方财富证券股份有限公司拉萨东环路第二":   "拉萨帮",
-		"东方财富证券股份有限公司拉萨金融城南环路":  "拉萨帮",
-		"东方财富证券股份有限公司拉萨金珠西路":    "拉萨帮",
+		"东方财富拉萨团结路":            "拉萨帮",
+		"东方财富拉萨东环路":            "拉萨帮",
+		"东方财富拉萨东环路第二":          "拉萨帮",
+		"东方财富拉萨金融城南环路":         "拉萨帮",
+		"东方财富拉萨金珠西路":           "拉萨帮",
+		"东方财富证券拉萨":             "拉萨帮",
+		"东方财富证券股份有限公司拉萨团结路":    "拉萨帮",
+		"东方财富证券股份有限公司拉萨东环路":    "拉萨帮",
+		"东方财富证券股份有限公司拉萨东环路第二":  "拉萨帮",
+		"东方财富证券股份有限公司拉萨金融城南环路": "拉萨帮",
+		"东方财富证券股份有限公司拉萨金珠西路":   "拉萨帮",
 		// 温州帮
-		"华鑫证券温州":               "温州帮",
-		"中银国际温州":               "温州帮",
-		"银河证券温州":               "温州帮",
-		"华鑫证券乐清双雁路":            "温州帮",
-		"华鑫证券有限责任公司乐清双雁路":      "温州帮",
-		"申万宏源温州车站大道":            "温州帮",
-		"申万宏源证券有限公司温州车站大道":      "温州帮",
-		"西南证券温州汤家桥路":            "温州帮",
-		"西南证券股份有限公司温州汤家桥路":      "温州帮",
-		"平安证券上海常熟路":             "温州帮",
-		"平安证券股份有限公司上海常熟路":       "温州帮",
+		"华鑫证券温州":           "温州帮",
+		"中银国际温州":           "温州帮",
+		"银河证券温州":           "温州帮",
+		"华鑫证券乐清双雁路":        "温州帮",
+		"华鑫证券有限责任公司乐清双雁路":  "温州帮",
+		"申万宏源温州车站大道":       "温州帮",
+		"申万宏源证券有限公司温州车站大道": "温州帮",
+		"西南证券温州汤家桥路":       "温州帮",
+		"西南证券股份有限公司温州汤家桥路": "温州帮",
+		"平安证券上海常熟路":        "温州帮",
+		"平安证券股份有限公司上海常熟路":  "温州帮",
 		// 苏南帮
-		"长江证券武汉友谊路":             "苏南帮",
-		"长江证券股份有限公司武汉友谊路":       "苏南帮",
-		"长江证券南京中山东路":            "苏南帮",
-		"长江证券股份有限公司南京中山东路":      "苏南帮",
-		"华泰证券南京江宁天元东路":          "苏南帮",
-		"华泰证券股份有限公司南京江宁天元东路":    "苏南帮",
-		"华泰证券南京庐山路":             "苏南帮",
-		"华泰证券股份有限公司南京庐山路":       "苏南帮",
-		"华泰证券镇江句容华阳北路":          "苏南帮",
-		"华泰证券股份有限公司镇江句容华阳北路":    "苏南帮",
-		"华泰证券无锡金融一街":            "苏南帮",
-		"华泰证券股份有限公司无锡金融一街":      "苏南帮",
-		"东海证券南京洪武北路":            "苏南帮",
-		"东海证券股份有限公司南京洪武北路":      "苏南帮",
+		"长江证券武汉友谊路":          "苏南帮",
+		"长江证券股份有限公司武汉友谊路":    "苏南帮",
+		"长江证券南京中山东路":         "苏南帮",
+		"长江证券股份有限公司南京中山东路":   "苏南帮",
+		"华泰证券南京江宁天元东路":       "苏南帮",
+		"华泰证券股份有限公司南京江宁天元东路": "苏南帮",
+		"华泰证券南京庐山路":          "苏南帮",
+		"华泰证券股份有限公司南京庐山路":    "苏南帮",
+		"华泰证券镇江句容华阳北路":       "苏南帮",
+		"华泰证券股份有限公司镇江句容华阳北路": "苏南帮",
+		"华泰证券无锡金融一街":         "苏南帮",
+		"华泰证券股份有限公司无锡金融一街":   "苏南帮",
+		"东海证券南京洪武北路":         "苏南帮",
+		"东海证券股份有限公司南京洪武北路":   "苏南帮",
 		// 苏州帮
-		"广发证券苏州东吴北路":            "苏州帮",
-		"广发证券股份有限公司苏州东吴北路":      "苏州帮",
-		"华泰证券苏州人民路":             "苏州帮",
-		"华泰证券股份有限公司苏州人民路":       "苏州帮",
-		"东吴证券苏州西北街":             "苏州帮",
-		"东吴证券股份有限公司苏州西北街":       "苏州帮",
-		"海通证券杭州市心北路":            "苏州帮",
-		"海通证券股份有限公司杭州市心北路":      "苏州帮",
+		"广发证券苏州东吴北路":       "苏州帮",
+		"广发证券股份有限公司苏州东吴北路": "苏州帮",
+		"华泰证券苏州人民路":        "苏州帮",
+		"华泰证券股份有限公司苏州人民路":  "苏州帮",
+		"东吴证券苏州西北街":        "苏州帮",
+		"东吴证券股份有限公司苏州西北街":  "苏州帮",
+		"海通证券杭州市心北路":       "苏州帮",
+		"海通证券股份有限公司杭州市心北路": "苏州帮",
 		// 杭州帮
-		"浙商证券杭州萧山永久路":           "杭州帮",
-		"浙商证券股份有限公司杭州萧山永久路":     "杭州帮",
-		"光大证券杭州延安路":             "杭州帮",
-		"光大证券股份有限公司杭州延安路":       "杭州帮",
-		"中国银河证券杭州景芳":            "杭州帮",
-		"中国银河证券股份有限公司杭州景芳":      "杭州帮",
-		"中国银河证券杭州天城东路":          "杭州帮",
-		"中国银河证券股份有限公司杭州天城东路":    "杭州帮",
-		"中国银河证券杭州凤起路":           "杭州帮",
-		"中国银河证券股份有限公司杭州凤起路":     "杭州帮",
-		"中信证券杭州庆春路":             "杭州帮",
-		"中信证券股份有限公司杭州庆春路":       "杭州帮",
-		"中信建投杭州庆春路":             "杭州帮",
-		"中信建投证券股份有限公司杭州庆春路":     "杭州帮",
+		"浙商证券杭州萧山永久路":        "杭州帮",
+		"浙商证券股份有限公司杭州萧山永久路":  "杭州帮",
+		"光大证券杭州延安路":          "杭州帮",
+		"光大证券股份有限公司杭州延安路":    "杭州帮",
+		"中国银河证券杭州景芳":         "杭州帮",
+		"中国银河证券股份有限公司杭州景芳":   "杭州帮",
+		"中国银河证券杭州天城东路":       "杭州帮",
+		"中国银河证券股份有限公司杭州天城东路": "杭州帮",
+		"中国银河证券杭州凤起路":        "杭州帮",
+		"中国银河证券股份有限公司杭州凤起路":  "杭州帮",
+		"中信证券杭州庆春路":          "杭州帮",
+		"中信证券股份有限公司杭州庆春路":    "杭州帮",
+		"中信建投杭州庆春路":          "杭州帮",
+		"中信建投证券股份有限公司杭州庆春路":  "杭州帮",
 		// 武汉帮
-		"国泰海通武汉紫阳东路":            "武汉帮",
-		"国泰君安武汉紫阳东路":            "武汉帮",
-		"国泰君安证券股份有限公司武汉紫阳东路":    "武汉帮",
+		"国泰海通武汉紫阳东路":         "武汉帮",
+		"国泰君安武汉紫阳东路":         "武汉帮",
+		"国泰君安证券股份有限公司武汉紫阳东路": "武汉帮",
 		// 南京帮
-		"华泰证券南京中华路":             "南京帮",
-		"华泰证券股份有限公司南京中华路":       "南京帮",
+		"华泰证券南京中华路":       "南京帮",
+		"华泰证券股份有限公司南京中华路": "南京帮",
 		// 绍兴帮 - 浙江系
-		"中国银河绍兴":               "绍兴帮",
-		"财通证券绍兴":               "绍兴帮",
+		"中国银河绍兴": "绍兴帮",
+		"财通证券绍兴": "绍兴帮",
 		// 深圳帮
-		"恒泰证券深圳梅林路":             "深圳帮",
-		"恒泰证券股份有限公司深圳梅林路":       "深圳帮",
-		"华龙证券深圳民田路":             "深圳帮",
-		"华龙证券股份有限公司深圳民田路":       "深圳帮",
-		"华泰证券福州五一北路":            "深圳帮",
-		"华泰证券股份有限公司福州五一北路":      "深圳帮",
+		"恒泰证券深圳梅林路":        "深圳帮",
+		"恒泰证券股份有限公司深圳梅林路":  "深圳帮",
+		"华龙证券深圳民田路":        "深圳帮",
+		"华龙证券股份有限公司深圳民田路":  "深圳帮",
+		"华泰证券福州五一北路":       "深圳帮",
+		"华泰证券股份有限公司福州五一北路": "深圳帮",
 		// 浙江帮
-		"西部证券西安高新路":             "浙江帮",
-		"西部证券股份有限公司西安高新路":       "浙江帮",
-		"申万宏源瑞安罗阳大道":            "浙江帮",
-		"申万宏源证券有限公司瑞安罗阳大道":      "浙江帮",
-		"浙商证券路桥数码街":             "浙江帮",
-		"浙商证券股份有限公司路桥数码街":       "浙江帮",
+		"西部证券西安高新路":        "浙江帮",
+		"西部证券股份有限公司西安高新路":  "浙江帮",
+		"申万宏源瑞安罗阳大道":       "浙江帮",
+		"申万宏源证券有限公司瑞安罗阳大道": "浙江帮",
+		"浙商证券路桥数码街":        "浙江帮",
+		"浙商证券股份有限公司路桥数码街":  "浙江帮",
 
 		// ========== 量化/基金 ==========
 		// 量化基金
 		"华泰证券总部":               "量化基金",
-		"华泰证券股份有限公司总部":          "量化基金",
-		"中国国际金融上海黄浦区湖滨路":        "量化基金",
-		"中国国际金融股份有限公司上海黄浦区湖滨路":  "量化基金",
-		"中国国际金融上海分公司":           "量化基金",
-		"中国国际金融股份有限公司上海分公司":     "量化基金",
-		"中国中金财富北京宋庄路":           "量化基金",
-		"中国中金财富证券有限公司北京宋庄路":     "量化基金",
-		"东北证券绍兴金柯桥大道":           "量化基金",
-		"东北证券股份有限公司绍兴金柯桥大道":     "量化基金",
+		"华泰证券股份有限公司总部":         "量化基金",
+		"中国国际金融上海黄浦区湖滨路":       "量化基金",
+		"中国国际金融股份有限公司上海黄浦区湖滨路": "量化基金",
+		"中国国际金融上海分公司":          "量化基金",
+		"中国国际金融股份有限公司上海分公司":    "量化基金",
+		"中国中金财富北京宋庄路":          "量化基金",
+		"中国中金财富证券有限公司北京宋庄路":    "量化基金",
+		"东北证券绍兴金柯桥大道":          "量化基金",
+		"东北证券股份有限公司绍兴金柯桥大道":    "量化基金",
 		// 新生代
-		"银泰证券成都顺城大街":            "新生代",
-		"银泰证券有限责任公司成都顺城大街":      "新生代",
-		"安信证券广州猎德大道":            "新生代",
-		"安信证券股份有限公司广州猎德大道":      "新生代",
-		"华泰证券上海牡丹江路":            "新生代",
-		"华泰证券股份有限公司上海牡丹江路":      "新生代",
-		"中国银河证券上海新闸路":           "新生代",
-		"中国银河证券股份有限公司上海新闸路":     "新生代",
+		"银泰证券成都顺城大街":        "新生代",
+		"银泰证券有限责任公司成都顺城大街":  "新生代",
+		"安信证券广州猎德大道":        "新生代",
+		"安信证券股份有限公司广州猎德大道":  "新生代",
+		"华泰证券上海牡丹江路":        "新生代",
+		"华泰证券股份有限公司上海牡丹江路":  "新生代",
+		"中国银河证券上海新闸路":       "新生代",
+		"中国银河证券股份有限公司上海新闸路": "新生代",
 
 		// ========== 其他著名游资 ==========
 		// 涅槃重生
-		"华泰证券上海奉贤区碧秀路":          "涅槃重生",
-		"华泰证券上海碧秀路":             "涅槃重生",
-		"华泰证券股份有限公司上海奉贤区碧秀路":    "涅槃重生",
+		"华泰证券上海奉贤区碧秀路":       "涅槃重生",
+		"华泰证券上海碧秀路":          "涅槃重生",
+		"华泰证券股份有限公司上海奉贤区碧秀路": "涅槃重生",
 		// 小沈阳(锦州帮)
-		"华泰证券锦州":               "小沈阳",
-		"华泰证券股份有限公司锦州解放路":       "小沈阳",
+		"华泰证券锦州":          "小沈阳",
+		"华泰证券股份有限公司锦州解放路": "小沈阳",
 		// 职业炒手
-		"中信建投北京朝阳门北大街":          "职业炒手",
-		"中信建投证券北京朝阳门":           "职业炒手",
-		"中信建投证券股份有限公司北京朝阳门北大街":  "职业炒手",
+		"中信建投北京朝阳门北大街":         "职业炒手",
+		"中信建投证券北京朝阳门":          "职业炒手",
+		"中信建投证券股份有限公司北京朝阳门北大街": "职业炒手",
 		// 深圳帮(瑞银)
-		"瑞银证券上海花园石桥路":           "深圳帮(瑞银)",
-		"瑞银证券有限责任公司上海花园石桥路":     "深圳帮(瑞银)",
+		"瑞银证券上海花园石桥路":       "深圳帮(瑞银)",
+		"瑞银证券有限责任公司上海花园石桥路": "深圳帮(瑞银)",
 		// 上海帮
-		"光大证券上海番禺路":             "上海帮",
-		"光大证券股份有限公司上海番禺路":       "上海帮",
+		"光大证券上海番禺路":       "上海帮",
+		"光大证券股份有限公司上海番禺路": "上海帮",
 		// 北京帮
-		"中信证券北京总部":              "北京帮",
-		"中信建投北京三里河路":            "北京帮",
-		"中信建投证券股份有限公司北京三里河路":    "北京帮",
+		"中信证券北京总部":           "北京帮",
+		"中信建投北京三里河路":         "北京帮",
+		"中信建投证券股份有限公司北京三里河路": "北京帮",
 		// 宁波桶 - 宁波解放南路系
-		"银河证券宁波解放南路":            "宁波桶",
-		"华鑫证券宁波":               "宁波桶",
+		"银河证券宁波解放南路": "宁波桶",
+		"华鑫证券宁波":     "宁波桶",
 		// 炒新一族
-		"华泰证券无锡解放西路":            "炒新一族",
-		"华泰证券股份有限公司无锡解放西路":      "炒新一族",
-		"华泰证券上海静安区广中西路":         "炒新一族",
-		"华泰证券股份有限公司上海静安区广中西路":   "炒新一族",
-		"华泰证券上海普陀区江宁路":          "炒新一族",
-		"华泰证券股份有限公司上海普陀区江宁路":    "炒新一族",
+		"华泰证券无锡解放西路":          "炒新一族",
+		"华泰证券股份有限公司无锡解放西路":    "炒新一族",
+		"华泰证券上海静安区广中西路":       "炒新一族",
+		"华泰证券股份有限公司上海静安区广中西路": "炒新一族",
+		"华泰证券上海普陀区江宁路":        "炒新一族",
+		"华泰证券股份有限公司上海普陀区江宁路":  "炒新一族",
 		// 敢死队
-		"平安证券深圳深南东路罗湖商务中心":      "敢死队",
+		"平安证券深圳深南东路罗湖商务中心":       "敢死队",
 		"平安证券股份有限公司深圳深南东路罗湖商务中心": "敢死队",
-		"中泰证券上海建国中路":            "敢死队",
-		"中泰证券股份有限公司上海建国中路":      "敢死队",
+		"中泰证券上海建国中路":             "敢死队",
+		"中泰证券股份有限公司上海建国中路":       "敢死队",
 		// 撬板王
-		"兴业证券苏州分公司":             "撬板王",
-		"兴业证券股份有限公司苏州分公司":       "撬板王",
-		"兴业证券深圳分公司":             "撬板王",
-		"兴业证券股份有限公司深圳分公司":       "撬板王",
+		"兴业证券苏州分公司":       "撬板王",
+		"兴业证券股份有限公司苏州分公司": "撬板王",
+		"兴业证券深圳分公司":       "撬板王",
+		"兴业证券股份有限公司深圳分公司": "撬板王",
 		// 高毅邻山(冯柳)
-		"国信证券深圳罗湖宝安北路":          "高毅邻山(冯柳)",
-		"国信证券股份有限公司深圳罗湖宝安北路":    "高毅邻山(冯柳)",
+		"国信证券深圳罗湖宝安北路":       "高毅邻山(冯柳)",
+		"国信证券股份有限公司深圳罗湖宝安北路": "高毅邻山(冯柳)",
 		// 葛卫东
-		"国泰君安上海分公司":             "葛卫东",
-		"国泰君安证券股份有限公司上海分公司":     "葛卫东",
+		"国泰君安上海分公司":         "葛卫东",
+		"国泰君安证券股份有限公司上海分公司": "葛卫东",
 
 		// ========== 机构/北向资金 ==========
-		"沪股通专用":                "沪股通",
-		"深股通专用":                "深股通",
-		"机构专用":                 "机构",
-		"机构专用1":                "机构",
-		"机构专用2":                "机构",
-		"机构专用3":                "机构",
-		"机构专用4":                "机构",
-		"机构专用5":                "机构",
+		"沪股通专用": "沪股通",
+		"深股通专用": "深股通",
+		"机构专用":  "机构",
+		"机构专用1": "机构",
+		"机构专用2": "机构",
+		"机构专用3": "机构",
+		"机构专用4": "机构",
+		"机构专用5": "机构",
 	}
 }
 
@@ -2278,10 +2465,10 @@ func (h *Handler) GetSectorFundFlow(c *gin.Context) {
 
 // GetRealDashboardData returns complete real-time dashboard data from Eastmoney
 func (h *Handler) GetRealDashboardData(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	forceRefresh := c.DefaultQuery("refresh", "false") == "true"
 
-	today := time.Now().Format("2006-01-02")
+	today := currentSessionDate()
 	if forceRefresh || date == today {
 		go fetchAllMarketData(date)
 	}
@@ -2422,7 +2609,8 @@ func fetchBatchQuotesEastmoney(codes []string) map[string]*model.StockQuote {
 		secids = append(secids, buildSecID(code))
 	}
 
-	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/ulist.np/get?secids=%s&fields=f2,f3,f4,f5,f6,f7,f12,f14,f15,f16,f17,f18,f43,f44,f45,f46,f47,f48,f50,f51,f52,f55,f57,f58,f60,f116,f117",
+	// fltt=2 asks for decimal values; without it ulist returns prices as integer cents.
+	url := fmt.Sprintf("https://push2.eastmoney.com/api/qt/ulist.np/get?secids=%s&fltt=2&invt=2&fields=f2,f3,f4,f5,f6,f7,f12,f14,f15,f16,f17,f18,f43,f44,f45,f46,f47,f48,f50,f51,f52,f55,f57,f58,f60,f116,f117",
 		strings.Join(secids, ","))
 
 	data, err := fetchEastmoneyAPIWithRetry(url, 3)
@@ -2466,8 +2654,6 @@ func fetchBatchQuotesEastmoney(codes []string) map[string]*model.StockQuote {
 		code := safeString(d, "f12")
 		price := safeFloat(d, "f2")
 		preClose := safeFloat(d, "f18")
-		// Note: Eastmoney returns prices in yuan directly, no scaling needed
-		// The previous /100 hack was incorrect and caused bugs for high-price stocks
 		high := safeFloat(d, "f15")
 		low := safeFloat(d, "f16")
 		open := safeFloat(d, "f17")
@@ -2607,8 +2793,8 @@ func (h *Handler) GetMarketHotList(c *gin.Context) {
 	listType := c.DefaultQuery("type", "hour") // "hour" or "day"
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	sortField := c.DefaultQuery("sort_field", "rank")   // rank, heat, change_pct, market_cap
-	sortOrder := c.DefaultQuery("sort_order", "asc")     // asc or desc
+	sortField := c.DefaultQuery("sort_field", "rank") // rank, heat, change_pct, market_cap
+	sortOrder := c.DefaultQuery("sort_order", "asc")  // asc or desc
 	if page < 1 {
 		page = 1
 	}
@@ -3106,18 +3292,28 @@ func (h *Handler) getKLineRealtimeEastmoney(c *gin.Context, code string, period 
 
 	data, err := fetchEastmoneyAPIWithRetry(url, 3)
 	if err != nil {
-		response.InternalError(c, "获取K线数据失败: "+err.Error())
+		log.Printf("[GetKLineRealtime] 东财K线请求失败 %s period=%s: %v", code, period, err)
+		if emTryKLineFallback(c, code, period, limit) {
+			return
+		}
+		response.InternalError(c, "获取K线数据失败: "+err.Error()+emMinutePeriodNote(period))
 		return
 	}
 
 	var raw map[string]interface{}
 	if err := json.Unmarshal(data, &raw); err != nil {
-		response.InternalError(c, "解析K线数据失败")
+		if emTryKLineFallback(c, code, period, limit) {
+			return
+		}
+		response.InternalError(c, "解析K线数据失败"+emMinutePeriodNote(period))
 		return
 	}
 
 	resultData, ok := raw["data"].(map[string]interface{})
 	if !ok {
+		if emTryKLineFallback(c, code, period, limit) {
+			return
+		}
 		response.Success(c, gin.H{"klines": []interface{}{}, "code": code, "period": period})
 		return
 	}
@@ -3165,13 +3361,60 @@ func (h *Handler) getKLineRealtimeEastmoney(c *gin.Context, code string, period 
 		}
 	}
 
+	if len(klines) == 0 && emTryKLineFallback(c, code, period, limit) {
+		return
+	}
+
 	response.Success(c, gin.H{
-		"code":      code,
-		"name":      name,
-		"period":    period,
-		"pre_close": preClose,
-		"klines":    klines,
+		"code":        code,
+		"name":        name,
+		"period":      period,
+		"pre_close":   preClose,
+		"klines":      klines,
+		"data_source": "东方财富K线",
 	})
+}
+
+// emTryKLineFallback serves the K-line request from Sina/Tencent when the blocked
+// Eastmoney history API yields nothing, keeping the handler's response shape.
+func emTryKLineFallback(c *gin.Context, code, period string, limit int) bool {
+	bars, source, err := fetchPeriodKLineFallback(code, period, limit)
+	if err == nil && len(bars) == 0 {
+		err = fmt.Errorf("兜底源无数据")
+	}
+	if err != nil {
+		log.Printf("[GetKLineRealtime] 兜底K线失败 %s period=%s: %v", code, period, err)
+		return false
+	}
+
+	name := ""
+	preClose := 0.0
+	if quotes, qErr := fetchQuoteViaUlist([]string{code}); qErr == nil && len(quotes) > 0 {
+		name = safeString(quotes[0], "name")
+		preClose = safeFloat(quotes[0], "pre_close")
+	}
+	if preClose <= 0 && len(bars) >= 2 {
+		preClose, _ = bars[len(bars)-2]["close"].(float64)
+	}
+
+	log.Printf("[GetKLineRealtime] %s 使用兜底数据源 %s: %d 根K线", code, source, len(bars))
+	response.Success(c, gin.H{
+		"code":        code,
+		"name":        name,
+		"period":      period,
+		"pre_close":   preClose,
+		"klines":      bars,
+		"data_source": source,
+	})
+	return true
+}
+
+func emMinutePeriodNote(period string) string {
+	switch period {
+	case "minute", "1min", "1", "5min", "5", "15min", "15", "30min", "30", "60min", "60":
+		return "(分钟级K线暂无兜底数据源)"
+	}
+	return ""
 }
 
 // ==================== Guba (股吧) Discussion ====================

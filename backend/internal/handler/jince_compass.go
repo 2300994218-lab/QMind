@@ -43,22 +43,22 @@ type JinCeAnalysisRequest struct {
 }
 
 type JinCeAnalysisResult struct {
-	Code          string               `json:"code"`
-	Name          string               `json:"name"`
-	Mode          string               `json:"mode"`
-	DataSource    string               `json:"data_source_used"`
-	AIModel       string               `json:"ai_model"`
-	AnalyzedAt    string               `json:"analyzed_at"`
-	CrownPrince   *CrownPrinceResult   `json:"crown_prince"`
-	ZhongshuSheng *ZhongshuResult      `json:"zhongshu_sheng"`
-	MenxiaSheng   *MenxiaResult        `json:"menxia_sheng"`
-	ShangshuSheng *ShangshuResult      `json:"shangshu_sheng"`
-	AIInsights    string               `json:"ai_insights"`
-	Suggestion    string               `json:"suggestion"` // buy/sell/hold
-	Confidence    int                  `json:"confidence"` // 0-100
-	RiskLevel     string               `json:"risk_level"` // low/medium/high
-	Indicators    map[string]float64   `json:"indicators"`
-	BacktestResult *BacktestSummary    `json:"backtest_result,omitempty"`
+	Code           string             `json:"code"`
+	Name           string             `json:"name"`
+	Mode           string             `json:"mode"`
+	DataSource     string             `json:"data_source_used"`
+	AIModel        string             `json:"ai_model"`
+	AnalyzedAt     string             `json:"analyzed_at"`
+	CrownPrince    *CrownPrinceResult `json:"crown_prince"`
+	ZhongshuSheng  *ZhongshuResult    `json:"zhongshu_sheng"`
+	MenxiaSheng    *MenxiaResult      `json:"menxia_sheng"`
+	ShangshuSheng  *ShangshuResult    `json:"shangshu_sheng"`
+	AIInsights     string             `json:"ai_insights"`
+	Suggestion     string             `json:"suggestion"` // buy/sell/hold
+	Confidence     int                `json:"confidence"` // 0-100
+	RiskLevel      string             `json:"risk_level"` // low/medium/high
+	Indicators     map[string]float64 `json:"indicators"`
+	BacktestResult *BacktestSummary   `json:"backtest_result,omitempty"`
 }
 
 type CrownPrinceResult struct {
@@ -267,24 +267,146 @@ func compassFetchKlines(code, period, dataSource string) ([]map[string]interface
 		freq = "daily"
 	}
 
-	// Try AkShare service first
-	akURL := getAkShareServiceURL()
-	if akURL != "" {
-		klines, err := compassFetchFromAkShare(akURL, code, freq)
-		if err == nil && len(klines) > 0 {
-			return klines, "akshare", nil
+	// The UI exposes an explicit source selector.  Honour it instead of always
+	// trying AkShare first (which made the selector effectively a no-op).
+	requested := strings.ToLower(strings.TrimSpace(dataSource))
+	if requested == "" {
+		requested = "system"
+	}
+
+	tryAkShare := func() ([]map[string]interface{}, error) {
+		akURL := getAkShareServiceURL()
+		if akURL == "" {
+			return nil, fmt.Errorf("AkShare服务地址未配置")
 		}
-		log.Printf("[金策罗盘] AkShare获取失败: %v, 尝试东方财富", err)
+		return compassFetchFromAkShare(akURL, code, freq)
+	}
+	tryTushare := func() ([]map[string]interface{}, error) {
+		return compassFetchFromTushare(code, period, 120)
+	}
+	tryEastmoney := func() ([]map[string]interface{}, error) {
+		return compassFetchFromEastmoney(code, period)
+	}
+	trySinaTencent := func() ([]map[string]interface{}, error) {
+		bars, source, err := fetchPeriodKLineFallback(code, period, 120)
+		if err != nil {
+			return nil, err
+		}
+		if len(bars) == 0 {
+			return nil, fmt.Errorf("%s返回空K线", source)
+		}
+		// Mirror the key set used by the Tushare/Eastmoney adapters so every
+		// downstream reader (extractCloses/extractVolumes/KDJ/ATR/回测) works unchanged.
+		klines := make([]map[string]interface{}, 0, len(bars))
+		for _, bar := range bars {
+			klines = append(klines, map[string]interface{}{
+				"date":       safeString(bar, "date"),
+				"open":       safeFloat(bar, "open"),
+				"close":      safeFloat(bar, "close"),
+				"high":       safeFloat(bar, "high"),
+				"low":        safeFloat(bar, "low"),
+				"volume":     safeFloat(bar, "volume"),
+				"amount":     safeFloat(bar, "amount"),
+				"change_pct": safeFloat(bar, "change_pct"),
+				"turnover":   safeFloat(bar, "turnover"),
+			})
+		}
+		log.Printf("[金策罗盘] %s兜底获取 %d 根K线 code=%s period=%s", source, len(klines), code, period)
+		return klines, nil
 	}
 
-	// Fallback: eastmoney historical API
-	klines, err := compassFetchFromEastmoney(code, period)
-	if err == nil && len(klines) > 0 {
-		return klines, "eastmoney", nil
+	// Explicit source: use only the selected source and report a useful error.
+	if requested != "system" {
+		var klines []map[string]interface{}
+		var err error
+		switch requested {
+		case "akshare":
+			klines, err = tryAkShare()
+		case "tushare":
+			klines, err = tryTushare()
+		case "eastmoney":
+			klines, err = tryEastmoney()
+		case "sina", "tencent", "sina-tencent":
+			klines, err = trySinaTencent()
+		default:
+			return nil, "", fmt.Errorf("不支持的数据源: %s", dataSource)
+		}
+		if err == nil && len(klines) > 0 {
+			return klines, requested, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("返回空K线")
+		}
+		return nil, "", fmt.Errorf("%s数据源获取失败: %v", requested, err)
 	}
-	log.Printf("[金策罗盘] 东方财富获取失败: %v", err)
 
-	return nil, "", fmt.Errorf("所有数据源均获取失败")
+	// system: resilient order. Tushare is the configured primary source in the
+	// settings page, while AkShare/Eastmoney remain useful fallbacks. Sina/Tencent
+	// close the chain because push2his kline/get is blocked on some networks.
+	sources := []struct {
+		name string
+		fn   func() ([]map[string]interface{}, error)
+	}{
+		{"tushare", tryTushare},
+		{"akshare", tryAkShare},
+		{"eastmoney", tryEastmoney},
+		{"sina", trySinaTencent},
+	}
+	var failures []string
+	for _, source := range sources {
+		klines, err := source.fn()
+		if err == nil && len(klines) > 0 {
+			return klines, source.name, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("返回空K线")
+		}
+		failures = append(failures, fmt.Sprintf("%s(%v)", source.name, err))
+		log.Printf("[金策罗盘] %s获取失败: %v", source.name, err)
+	}
+
+	tip := ""
+	if compassIsMinutePeriod(period) {
+		tip = "，分钟级K线暂无兜底数据源，请改用日/周/月周期"
+	}
+	return nil, "", fmt.Errorf("所有数据源均获取失败 [%s]%s", strings.Join(failures, "; "), tip)
+}
+
+// compassIsMinutePeriod reports the periods the Sina/Tencent fallback cannot
+// serve, so the failure message can suggest a workable period instead.
+func compassIsMinutePeriod(period string) bool {
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "", "day", "daily", "101", "week", "weekly", "102", "month", "monthly", "103":
+		return false
+	default:
+		return true
+	}
+}
+
+// compassFetchFromTushare adapts the shared Tushare K-line implementation to
+// the compass map format. Keeping this adapter here avoids duplicating the
+// API/field/unit conversion logic used by the market endpoints.
+func compassFetchFromTushare(code, period string, limit int) ([]map[string]interface{}, error) {
+	if limit <= 0 {
+		limit = 120
+	}
+	result := fetchKLineTushare(code, period, limit)
+	raw, ok := result["klines"]
+	if !ok {
+		return nil, fmt.Errorf("Tushare响应缺少klines字段")
+	}
+	items, ok := raw.([]gin.H)
+	if !ok {
+		return nil, fmt.Errorf("Tushare K线格式错误")
+	}
+	klines := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		klines = append(klines, map[string]interface{}(item))
+	}
+	if len(klines) == 0 {
+		return nil, fmt.Errorf("Tushare返回空K线")
+	}
+	return klines, nil
 }
 
 func compassFetchFromAkShare(akURL, code, freq string) ([]map[string]interface{}, error) {
@@ -1412,13 +1534,14 @@ func findCompassStrategy(id string) *JinCeStrategy {
 func (h *Handler) GetCompassKline(c *gin.Context) {
 	code := c.Query("code")
 	period := c.DefaultQuery("period", "day")
+	dataSource := c.DefaultQuery("data_source", "system")
 
 	if code == "" {
 		response.Error(c, 400, "缺少股票代码参数")
 		return
 	}
 
-	klines, dataSource, err := compassFetchKlines(code, period, "system")
+	klines, dataSourceUsed, err := compassFetchKlines(code, period, dataSource)
 	if err != nil {
 		response.Error(c, 500, "获取K线失败: "+err.Error())
 		return
@@ -1427,7 +1550,7 @@ func (h *Handler) GetCompassKline(c *gin.Context) {
 	response.Success(c, gin.H{
 		"code":        code,
 		"period":      period,
-		"data_source": dataSource,
+		"data_source": dataSourceUsed,
 		"klines":      klines,
 		"count":       len(klines),
 	})
@@ -1436,34 +1559,35 @@ func (h *Handler) GetCompassKline(c *gin.Context) {
 // ==================== Strategy Evolution Endpoint ====================
 
 type EvolutionRequest struct {
-	Code         string   `json:"code" binding:"required"`
-	Name         string   `json:"name"`
-	Strategies   []string `json:"strategies"`
-	MaxRounds    int      `json:"max_rounds"`
-	Period       string   `json:"period"`
+	Code       string   `json:"code" binding:"required"`
+	Name       string   `json:"name"`
+	Strategies []string `json:"strategies"`
+	MaxRounds  int      `json:"max_rounds"`
+	Period     string   `json:"period"`
+	DataSource string   `json:"data_source"`
 }
 
 type EvolutionResult struct {
-	Status         string              `json:"status"` // running/completed/failed
-	CurrentRound   int                 `json:"current_round"`
-	MaxRounds      int                 `json:"max_rounds"`
-	Progress       float64             `json:"progress"` // 0-100
-	BestScore      float64             `json:"best_score"`
-	BestStrategy   string              `json:"best_strategy"`
-	Rounds         []EvolutionRound    `json:"rounds"`
-	Summary        string              `json:"summary"`
+	Status       string           `json:"status"` // running/completed/failed
+	CurrentRound int              `json:"current_round"`
+	MaxRounds    int              `json:"max_rounds"`
+	Progress     float64          `json:"progress"` // 0-100
+	BestScore    float64          `json:"best_score"`
+	BestStrategy string           `json:"best_strategy"`
+	Rounds       []EvolutionRound `json:"rounds"`
+	Summary      string           `json:"summary"`
 }
 
 type EvolutionRound struct {
-	Round       int     `json:"round"`
-	StrategyID  string  `json:"strategy_id"`
-	StrategyName string `json:"strategy_name"`
-	Score       float64 `json:"score"`
-	WinRate     float64 `json:"win_rate"`
-	Sharpe      float64 `json:"sharpe"`
-	Status      string  `json:"status"` // pass/reject/error
-	Duration    float64 `json:"duration_sec"`
-	Reason      string  `json:"reason"`
+	Round        int     `json:"round"`
+	StrategyID   string  `json:"strategy_id"`
+	StrategyName string  `json:"strategy_name"`
+	Score        float64 `json:"score"`
+	WinRate      float64 `json:"win_rate"`
+	Sharpe       float64 `json:"sharpe"`
+	Status       string  `json:"status"` // pass/reject/error
+	Duration     float64 `json:"duration_sec"`
+	Reason       string  `json:"reason"`
 }
 
 func (h *Handler) RunCompassEvolution(c *gin.Context) {
@@ -1479,6 +1603,9 @@ func (h *Handler) RunCompassEvolution(c *gin.Context) {
 	if req.Period == "" {
 		req.Period = "day"
 	}
+	if req.DataSource == "" {
+		req.DataSource = "system"
+	}
 	if len(req.Strategies) == 0 {
 		for _, s := range builtinCompassStrategies {
 			if s.IsActive {
@@ -1490,7 +1617,7 @@ func (h *Handler) RunCompassEvolution(c *gin.Context) {
 	log.Printf("[金策罗盘] 策略进化 code=%s rounds=%d strategies=%v", req.Code, req.MaxRounds, req.Strategies)
 
 	// Fetch kline data
-	klines, _, err := compassFetchKlines(req.Code, req.Period, "system")
+	klines, _, err := compassFetchKlines(req.Code, req.Period, req.DataSource)
 	if err != nil {
 		response.Error(c, 500, "数据获取失败: "+err.Error())
 		return

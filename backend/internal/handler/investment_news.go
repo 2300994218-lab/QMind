@@ -22,18 +22,18 @@ import (
 // ==================== Models ====================
 
 type InvestmentNews struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	Track      string    `gorm:"size:50;index" json:"track"`
-	TrackName  string    `gorm:"size:100" json:"track_name"`
-	Source     string    `gorm:"size:100" json:"source"`
-	Title      string    `gorm:"size:500" json:"title"`
-	TitleCN    string    `gorm:"size:500" json:"title_cn"`
-	Link       string    `gorm:"size:1000" json:"link"`
-	Summary    string    `gorm:"type:text" json:"summary"`
-	PubDate    time.Time `gorm:"index" json:"pub_date"`
-	FetchDate  string    `gorm:"size:20;index" json:"fetch_date"`
-	Hash       string    `gorm:"size:64;uniqueIndex" json:"hash"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	Track     string    `gorm:"size:50;index" json:"track"`
+	TrackName string    `gorm:"size:100" json:"track_name"`
+	Source    string    `gorm:"size:100" json:"source"`
+	Title     string    `gorm:"size:500" json:"title"`
+	TitleCN   string    `gorm:"size:500" json:"title_cn"`
+	Link      string    `gorm:"size:1000" json:"link"`
+	Summary   string    `gorm:"type:text" json:"summary"`
+	PubDate   time.Time `gorm:"index" json:"pub_date"`
+	FetchDate string    `gorm:"size:20;index" json:"fetch_date"`
+	Hash      string    `gorm:"size:64;uniqueIndex" json:"hash"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type InvestmentHighlight struct {
@@ -556,8 +556,8 @@ func (h *Handler) fetchAndStoreNews() {
 // ==================== API Handlers ====================
 
 func (h *Handler) GetInvestmentNews(c *gin.Context) {
-	track := c.Query("track")    // optional filter
-	date := c.Query("date")      // optional: specific date
+	track := c.Query("track") // optional filter
+	date := c.Query("date")   // optional: specific date
 	page := c.DefaultQuery("page", "1")
 
 	query := repository.DB.Model(&InvestmentNews{}).Order("pub_date DESC")

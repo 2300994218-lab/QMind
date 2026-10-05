@@ -25,13 +25,16 @@ export default function AIStockPickPage() {
   const [selectedBatchId, setSelectedBatchId] = useState('')
   const [selectedStock, setSelectedStock] = useState(null)
   const [showDetail, setShowDetail] = useState(false)
+  const [runStage, setRunStage] = useState('')
+  const pollRef = useRef(null)
   const pageSize = 5
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (forceRefresh = false) => {
     setLoading(true)
     try {
       const params = { page, page_size: pageSize }
       if (selectedBatchId) params.batch_id = selectedBatchId
+      if (forceRefresh) params.refresh = 'true'
       const res = await getAIStockPicks(params)
       if (res.code === 0) {
         setPicks(res.data.items || [])
@@ -45,9 +48,9 @@ export default function AIStockPickPage() {
     setLoading(false)
   }, [page, selectedBatchId])
 
-  const fetchStats = async () => {
+  const fetchStats = async (forceRefresh = false) => {
     try {
-      const res = await getAIStockPickStats()
+      const res = await getAIStockPickStats(forceRefresh ? { refresh: 'true' } : undefined)
       if (res.code === 0) setStats(res.data)
     } catch(e) {}
   }
@@ -55,20 +58,74 @@ export default function AIStockPickPage() {
   useEffect(() => { fetchData() }, [fetchData])
   useEffect(() => { fetchStats() }, [])
 
+  const stopPolling = () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+  }
+
+  useEffect(() => stopPolling, [])
+
+  const pollBatch = (batchId) => {
+    stopPolling()
+    let waited = 0
+    pollRef.current = setInterval(async () => {
+      waited += 3000
+      try {
+        const res = await getAIStockPickBatches({ page: 1, page_size: 10 })
+        if (res.code === 0) {
+          const items = res.data.items || []
+          setBatches(items)
+          const b = items.find(x => x.batch_id === batchId)
+          if (b && b.status !== 'running') {
+            stopPolling()
+            setRunning(false)
+            setRunStage('')
+            if (b.status === 'failed') {
+              toast.error(`筛选失败：${b.error_msg || '数据源不可用'}`, { duration: 12000 })
+            } else {
+              toast.success(`筛选完成：${b.result_count} 只入选（${b.error_msg || ''}）`)
+            }
+            fetchData()
+            fetchStats()
+            return
+          }
+        }
+      } catch (e) { /* keep polling, the next tick retries */ }
+      if (waited >= 180000) {
+        stopPolling()
+        setRunning(false)
+        setRunStage('')
+        toast('筛选超过 3 分钟仍未返回，可点击"刷新"查看批次状态')
+      }
+    }, 3000)
+  }
+
   const handleRun = async () => {
     setRunning(true)
+    setRunStage('提交任务...')
     try {
       const res = await runAIStockPick()
-      if (res.code === 0) {
-        toast.success('隔夜套利筛选已提交，正在获取实时行情...')
-        setTimeout(() => { fetchData(); fetchStats() }, 15000)
-      } else {
-        toast.error('任务提交失败')
+      const d = res?.data || {}
+      if (res.code !== 0) {
+        toast.error(d.message || res.message || '任务提交失败')
+        setRunning(false)
+        setRunStage('')
+        return
       }
+      if (d.status === 'skipped') {
+        toast(d.message || '筛选任务未启动')
+        setRunning(false)
+        setRunStage('')
+        fetchData()
+        return
+      }
+      setRunStage('获取全市场行情中...')
+      toast.success(d.message || '筛选任务已启动')
+      pollBatch(d.batch_id)
     } catch(e) {
-      toast.error('任务提交失败')
+      toast.error('任务提交失败: ' + (e?.message || '网络错误'))
+      setRunning(false)
+      setRunStage('')
     }
-    setRunning(false)
   }
 
   const handleSelectStock = (stock) => {
@@ -86,7 +143,7 @@ export default function AIStockPickPage() {
             隔夜套利
           </h1>
           <p className="text-xs text-gray-500 mt-1">
-            尾盘选股八步筛选 | 交易日 13:30 / 14:30 / 15:30 自动运行 | 数据来源: AkShare + 东方财富
+            尾盘选股八步筛选 | 交易日 13:30 / 14:30 / 15:30 自动运行 | 数据来源: 新浪/腾讯实时行情
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -94,9 +151,9 @@ export default function AIStockPickPage() {
             className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-white text-sm font-medium transition-all shadow-sm"
             style={{ background: running ? '#9CA3AF' : '#513CC8' }}>
             {running ? <RefreshCw size={14} className="animate-spin" /> : <Play size={14} />}
-            {running ? '筛选中...' : '立即筛选'}
+            {running ? (runStage || '筛选中...') : '立即筛选'}
           </button>
-          <button onClick={() => { fetchData(); fetchStats() }}
+          <button onClick={() => { fetchData(true); fetchStats(true) }}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-50 transition">
             <RefreshCw size={14} /> 刷新
           </button>

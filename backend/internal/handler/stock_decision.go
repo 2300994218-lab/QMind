@@ -1,11 +1,16 @@
 package handler
 
 import (
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/mail"
+	"net/smtp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,55 +24,55 @@ import (
 
 // StockDecision stores AI analysis results for individual stocks
 type StockDecision struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	Code          string    `gorm:"size:20;index:idx_sd_code_date" json:"code"`
-	Name          string    `gorm:"size:100" json:"name"`
-	Price         float64   `json:"price"`
-	ChangePct     float64   `json:"change_pct"`
-	Insights      string    `gorm:"type:longtext" json:"insights"`       // AI分析文本
-	Suggestion    string    `gorm:"size:20" json:"suggestion"`           // 买入/卖出/观望/加仓
-	Trend         string    `gorm:"size:20" json:"trend"`                // 上涨/下跌/震荡/反弹
-	Sentiment     int       `json:"sentiment"`                           // 0-100 情绪分
-	BuyPrice1     float64   `json:"buy_price_1"`                         // 理想买入价
-	BuyPrice2     float64   `json:"buy_price_2"`                         // 二次买入价
-	StopLoss      float64   `json:"stop_loss"`                           // 止损位
-	TakeProfit    float64   `json:"take_profit"`                         // 止盈目标
-	Reason        string    `gorm:"type:text" json:"reason"`             // 涨停原因/关键事件
-	TradeDate     string    `gorm:"size:20;index:idx_sd_code_date" json:"trade_date"`
-	AnalyzedAt    time.Time `json:"analyzed_at"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Code       string    `gorm:"size:20;index:idx_sd_code_date" json:"code"`
+	Name       string    `gorm:"size:100" json:"name"`
+	Price      float64   `json:"price"`
+	ChangePct  float64   `json:"change_pct"`
+	Insights   string    `gorm:"type:longtext" json:"insights"` // AI分析文本
+	Suggestion string    `gorm:"size:20" json:"suggestion"`     // 买入/卖出/观望/加仓
+	Trend      string    `gorm:"size:20" json:"trend"`          // 上涨/下跌/震荡/反弹
+	Sentiment  int       `json:"sentiment"`                     // 0-100 情绪分
+	BuyPrice1  float64   `json:"buy_price_1"`                   // 理想买入价
+	BuyPrice2  float64   `json:"buy_price_2"`                   // 二次买入价
+	StopLoss   float64   `json:"stop_loss"`                     // 止损位
+	TakeProfit float64   `json:"take_profit"`                   // 止盈目标
+	Reason     string    `gorm:"type:text" json:"reason"`       // 涨停原因/关键事件
+	TradeDate  string    `gorm:"size:20;index:idx_sd_code_date" json:"trade_date"`
+	AnalyzedAt time.Time `json:"analyzed_at"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // MarketReview stores daily market review
 type MarketReview struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	TradeDate     string    `gorm:"size:20;uniqueIndex" json:"trade_date"`
-	Summary       string    `gorm:"type:longtext" json:"summary"`         // 大盘总结
-	IndexSH       float64   `json:"index_sh"`                             // 上证
-	IndexSZ       float64   `json:"index_sz"`                             // 深证
-	IndexCYB      float64   `json:"index_cyb"`                            // 创业板
-	IndexSHPct    float64   `json:"index_sh_pct"`
-	IndexSZPct    float64   `json:"index_sz_pct"`
-	IndexCYBPct   float64   `json:"index_cyb_pct"`
-	UpCount       int       `json:"up_count"`
-	DownCount     int       `json:"down_count"`
-	LimitUp       int       `json:"limit_up"`
-	HighestBoard  int       `json:"highest_board"`
-	Suggestion    string    `gorm:"size:20" json:"suggestion"`            // 加仓/减仓/观望
-	MarketTrend   string    `gorm:"size:20" json:"market_trend"`          // 多头/空头/震荡
-	HotSectors    string    `gorm:"type:text" json:"hot_sectors"`         // 热点板块 JSON
-	CreatedAt     time.Time `json:"created_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	TradeDate    string    `gorm:"size:20;uniqueIndex" json:"trade_date"`
+	Summary      string    `gorm:"type:longtext" json:"summary"` // 大盘总结
+	IndexSH      float64   `json:"index_sh"`                     // 上证
+	IndexSZ      float64   `json:"index_sz"`                     // 深证
+	IndexCYB     float64   `json:"index_cyb"`                    // 创业板
+	IndexSHPct   float64   `json:"index_sh_pct"`
+	IndexSZPct   float64   `json:"index_sz_pct"`
+	IndexCYBPct  float64   `json:"index_cyb_pct"`
+	UpCount      int       `json:"up_count"`
+	DownCount    int       `json:"down_count"`
+	LimitUp      int       `json:"limit_up"`
+	HighestBoard int       `json:"highest_board"`
+	Suggestion   string    `gorm:"size:20" json:"suggestion"`    // 加仓/减仓/观望
+	MarketTrend  string    `gorm:"size:20" json:"market_trend"`  // 多头/空头/震荡
+	HotSectors   string    `gorm:"type:text" json:"hot_sectors"` // 热点板块 JSON
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // PushConfig stores push notification settings
 type PushConfig struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	Channel     string    `gorm:"size:50;uniqueIndex" json:"channel"` // wechat_work, feishu, email
-	Enabled     bool      `gorm:"default:false" json:"enabled"`
-	WebhookURL  string    `gorm:"size:500" json:"webhook_url"`
-	Extra       string    `gorm:"type:text" json:"extra"`  // JSON: email_to, email_from, smtp_host, etc.
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID         uint      `gorm:"primaryKey" json:"id"`
+	Channel    string    `gorm:"size:50;uniqueIndex" json:"channel"` // wechat_work, feishu, email
+	Enabled    bool      `gorm:"default:false" json:"enabled"`
+	WebhookURL string    `gorm:"size:500" json:"webhook_url"`
+	Extra      string    `gorm:"type:text" json:"extra"` // JSON: email_to, email_from, smtp_host, etc.
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 func init() {
@@ -75,7 +80,9 @@ func init() {
 }
 
 // AutoMigrateDecisionModels migrates decision-related models
-func AutoMigrateDecisionModels(db interface{ AutoMigrate(dst ...interface{}) error }) {
+func AutoMigrateDecisionModels(db interface {
+	AutoMigrate(dst ...interface{}) error
+}) {
 	db.AutoMigrate(
 		&StockDecision{},
 		&MarketReview{},
@@ -393,8 +400,45 @@ func fetchStockQuoteForDecision(code string) *stockQuoteInfo {
 		return quote
 	}
 
+	// Method 7: Eastmoney ulist.np, the one push2 quote endpoint that is not
+	// blocked on this network (api/qt/stock/get resets).
+	quote = fetchQuoteFromUlist(pureCode)
+	if quote != nil {
+		log.Printf("[Decision] Got quote from ulist: %s(%.2f)", quote.Name, quote.Price)
+		return quote
+	}
+
 	log.Printf("[Decision] All quote fetch methods failed for code=%s", code)
 	return nil
+}
+
+func fetchQuoteFromUlist(code string) *stockQuoteInfo {
+	rows, err := fetchQuoteViaUlist([]string{code})
+	if err != nil || len(rows) == 0 {
+		log.Printf("[Decision] ulist quote error: %v", err)
+		return nil
+	}
+	row := rows[0]
+	price, _ := row["close"].(float64)
+	if price <= 0 {
+		return nil
+	}
+	name, _ := row["name"].(string)
+	if name == "" {
+		return nil
+	}
+	num := func(k string) float64 { v, _ := row[k].(float64); return v }
+	return &stockQuoteInfo{
+		Code:      code,
+		Name:      name,
+		Price:     price,
+		ChangePct: num("change_pct"),
+		PreClose:  num("pre_close"),
+		High:      num("high"),
+		Low:       num("low"),
+		Volume:    num("volume"),
+		Amount:    num("amount"),
+	}
 }
 
 // fetchQuoteFromTushareDaily gets stock quote from Tushare daily API
@@ -410,8 +454,8 @@ func fetchQuoteFromTushareDaily(code string) *stockQuoteInfo {
 		}
 	}
 
-	// Try today first, then look back up to 10 days for the latest trading data
-	now := time.Now()
+	// Try the latest session first, then look back up to 10 days for trading data
+	now := sessionAnchor()
 	for i := 0; i < 10; i++ {
 		d := now.AddDate(0, 0, -i)
 		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -1334,13 +1378,117 @@ func sendFeishuMessage(webhookURL, message string) error {
 }
 
 func sendEmailMessage(config PushConfig, message string) error {
-	// Email sending would require SMTP - just validate config exists
-	if config.Extra == "" {
-		return fmt.Errorf("邮箱配置信息未填写")
+	if strings.TrimSpace(config.WebhookURL) == "" {
+		return fmt.Errorf("收件邮箱未配置")
 	}
-	log.Printf("[Push] Email notification would be sent: %s", message[:min(100, len(message))])
-	// TODO: Implement SMTP sending
-	return nil
+	if strings.TrimSpace(config.Extra) == "" {
+		return fmt.Errorf("SMTP配置信息未填写")
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(config.Extra), &raw); err != nil {
+		return fmt.Errorf("SMTP配置JSON格式错误: %w", err)
+	}
+	stringValue := func(key string) string {
+		value, ok := raw[key]
+		if !ok || value == nil {
+			return ""
+		}
+		if text, ok := value.(string); ok {
+			return strings.TrimSpace(text)
+		}
+		return fmt.Sprintf("%v", value)
+	}
+
+	smtpHost := stringValue("smtp_host")
+	if smtpHost == "" {
+		return fmt.Errorf("SMTP服务器地址未配置")
+	}
+	smtpPort := stringValue("smtp_port")
+	if smtpPort == "" {
+		smtpPort = "587"
+	}
+	if _, err := strconv.Atoi(smtpPort); err != nil {
+		return fmt.Errorf("SMTP端口无效: %s", smtpPort)
+	}
+	emailFrom := stringValue("email_from")
+	emailPass := stringValue("email_pass")
+	if emailFrom == "" || emailPass == "" {
+		return fmt.Errorf("email_from和email_pass必须配置")
+	}
+	fromParsed, err := mail.ParseAddress(emailFrom)
+	if err != nil {
+		return fmt.Errorf("发件邮箱格式无效: %w", err)
+	}
+	toParsed, err := mail.ParseAddress(config.WebhookURL)
+	if err != nil {
+		return fmt.Errorf("收件邮箱格式无效: %w", err)
+	}
+	smtpUser := stringValue("smtp_user")
+	if smtpUser == "" {
+		smtpUser = fromParsed.Address
+	}
+
+	to := toParsed.Address
+	fromAddress := emailFrom
+	envelopeFrom := fromParsed.Address
+	// Use a plain RFC 2045 message; smtp.SendMail handles the STARTTLS flow
+	// used by the common 587/25 ports.
+	mailBody := strings.Join([]string{
+		"From: " + fromAddress,
+		"To: " + to,
+		"Subject: =?UTF-8?B?" + encodeBase64("QuantMind推送测试") + "?=",
+		"MIME-Version: 1.0",
+		"Content-Type: text/plain; charset=UTF-8",
+		"",
+		message,
+	}, "\r\n")
+	auth := smtp.PlainAuth("", smtpUser, emailPass, smtpHost)
+	addr := net.JoinHostPort(smtpHost, smtpPort)
+	if smtpPort != "465" {
+		if err := smtp.SendMail(addr, auth, envelopeFrom, []string{to}, []byte(mailBody)); err != nil {
+			return fmt.Errorf("SMTP发送失败: %w", err)
+		}
+		return nil
+	}
+
+	// Port 465 uses implicit TLS and is not supported by smtp.SendMail's
+	// STARTTLS-only path, so establish a TLS client explicitly.
+	tlsConn, err := tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", addr, &tls.Config{ServerName: smtpHost, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return fmt.Errorf("SMTP TLS连接失败: %w", err)
+	}
+	client, err := smtp.NewClient(tlsConn, smtpHost)
+	if err != nil {
+		_ = tlsConn.Close()
+		return fmt.Errorf("SMTP客户端创建失败: %w", err)
+	}
+	defer client.Close()
+	if err := client.Auth(auth); err != nil {
+		return fmt.Errorf("SMTP认证失败: %w", err)
+	}
+	if err := client.Mail(envelopeFrom); err != nil {
+		return fmt.Errorf("SMTP发件人设置失败: %w", err)
+	}
+	if err := client.Rcpt(to); err != nil {
+		return fmt.Errorf("SMTP收件人设置失败: %w", err)
+	}
+	writer, err := client.Data()
+	if err != nil {
+		return fmt.Errorf("SMTP开始发送失败: %w", err)
+	}
+	if _, err := writer.Write([]byte(mailBody)); err != nil {
+		_ = writer.Close()
+		return fmt.Errorf("SMTP写入邮件失败: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("SMTP提交邮件失败: %w", err)
+	}
+	return client.Quit()
+}
+
+func encodeBase64(value string) string {
+	return base64.StdEncoding.EncodeToString([]byte(value))
 }
 
 // ==================== Stock News Feed ====================
@@ -1369,6 +1517,11 @@ func fetchStockNewsFromEastmoney(code, name string) []gin.H {
 	searchKey := code
 	if name != "" {
 		searchKey = name
+	}
+
+	// searchapi.eastmoney.com is gone; the web search endpoint still answers.
+	if news := fetchNewsFromEastmoneySearch(searchKey, 8); len(news) > 0 {
+		return news
 	}
 
 	url := fmt.Sprintf("https://searchapi.eastmoney.com/api/Info/Search?appkey=600a9aa1e5084a1ba41720e7bd0f5b0c&type=1&searchkey=%s&pageindex=1&pagesize=8", searchKey)

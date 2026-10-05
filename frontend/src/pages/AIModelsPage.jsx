@@ -19,12 +19,15 @@ export default function AIModelsPage() {
     } catch (e) {}
   }
 
-  const handleUpdate = async (provider) => {
+  const handleUpdate = async (id, updates, label = 'AI模型') => {
     try {
-      await updateAIProvider(provider.id, provider)
-      toast.success(`${provider.label} 已更新`)
-      load()
-    } catch (e) { toast.error('更新失败') }
+      const res = await updateAIProvider(id, updates)
+      if (res?.code !== 0) throw new Error(res?.message || '更新失败')
+      toast.success(`${label} 已更新`)
+      if (res.data) {
+        setProviders(prev => prev.map(item => item.id === id ? { ...item, ...res.data } : item))
+      }
+    } catch (e) { toast.error(`更新失败：${e.response?.data?.message || e.message || '未知错误'}`) }
   }
 
   const handleTest = async (id) => {
@@ -33,14 +36,17 @@ export default function AIModelsPage() {
       const res = await testAIProvider(id)
       if (res.code === 0) toast.success('连接成功！')
       else toast.error(res.message)
-    } catch (e) { toast.error('测试失败') }
+    } catch (e) { toast.error(`测试失败：${e.response?.data?.message || e.message || '未知错误'}`) }
     setTesting(null)
   }
 
   const handleSetDefault = async (provider) => {
-    await updateAIProvider(provider.id, { ...provider, is_default: true })
-    toast.success(`${provider.label} 已设为默认`)
-    load()
+    try {
+      const res = await updateAIProvider(provider.id, { is_default: true })
+      if (res?.code !== 0) throw new Error(res?.message || '设置默认模型失败')
+      toast.success(`${provider.label} 已设为默认`)
+      setProviders(prev => prev.map(item => ({ ...item, is_default: item.id === provider.id })))
+    } catch (e) { toast.error(`设置失败：${e.response?.data?.message || e.message || '未知错误'}`) }
   }
 
   const handleAddProvider = async () => {
@@ -50,7 +56,7 @@ export default function AIModelsPage() {
       setShowAdd(false)
       setNewProvider({ name: '', label: '', base_url: '', api_key: '', model: '', category: 'llm', is_enabled: true })
       load()
-    } catch (e) { toast.error('添加失败') }
+    } catch (e) { toast.error(`添加失败：${e.response?.data?.message || e.message || '未知错误'}`) }
   }
 
   const updateField = (id, field, value) => {
@@ -109,8 +115,9 @@ export default function AIModelsPage() {
                 )}
                 <label className="relative inline-flex items-center cursor-pointer">
                   <input type="checkbox" checked={p.is_enabled} onChange={e => {
-                    updateField(p.id, 'is_enabled', e.target.checked)
-                    handleUpdate({ ...p, is_enabled: e.target.checked })
+                    const enabled = e.target.checked
+                    updateField(p.id, 'is_enabled', enabled)
+                    handleUpdate(p.id, { is_enabled: enabled }, p.label)
                   }} className="sr-only peer" />
                   <div className="w-9 h-5 bg-gray-200 peer-checked:bg-[#513CC8] rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all after:shadow-sm"></div>
                 </label>
@@ -121,15 +128,15 @@ export default function AIModelsPage() {
               <div>
                 <label className="text-[10px] text-gray-400 mb-1 block">Base URL</label>
                 <input value={p.base_url} onChange={e => updateField(p.id, 'base_url', e.target.value)}
-                  onBlur={() => handleUpdate(p)}
+                  onBlur={e => handleUpdate(p.id, { base_url: e.currentTarget.value }, p.label)}
                   className="w-full px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-900 focus:border-[#513CC8] focus:outline-none" />
               </div>
               <div>
                 <label className="text-[10px] text-gray-400 mb-1 block">API Key</label>
                 <div className="relative">
-                  <input type={showKeys[p.id] ? 'text' : 'password'} value={p.api_key} 
+                  <input type={showKeys[p.id] ? 'text' : 'password'} value={p.api_key}
                     onChange={e => updateField(p.id, 'api_key', e.target.value)}
-                    onBlur={() => handleUpdate(p)}
+                    onBlur={e => handleUpdate(p.id, { api_key: e.currentTarget.value }, p.label)}
                     placeholder="在此填写API密钥"
                     className="w-full px-2.5 py-1.5 pr-8 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-900 focus:border-[#513CC8] focus:outline-none" />
                   <button onClick={() => setShowKeys({...showKeys, [p.id]: !showKeys[p.id]})}
@@ -141,7 +148,7 @@ export default function AIModelsPage() {
               <div>
                 <label className="text-[10px] text-gray-400 mb-1 block">模型</label>
                 <input value={p.model} onChange={e => updateField(p.id, 'model', e.target.value)}
-                  onBlur={() => handleUpdate(p)}
+                  onBlur={e => handleUpdate(p.id, { model: e.currentTarget.value }, p.label)}
                   className="w-full px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs text-gray-900 focus:border-[#513CC8] focus:outline-none" />
               </div>
             </div>

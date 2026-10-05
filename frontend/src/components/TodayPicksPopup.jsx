@@ -7,6 +7,7 @@ export default function TodayPicksPopup() {
   const [visible, setVisible] = useState(false)
   const [dismissed, setDismissed] = useState(false)
   const [currentIdx, setCurrentIdx] = useState(0)
+  const [sessionDate, setSessionDate] = useState('')
   const scrollRef = useRef(null)
   const timerRef = useRef(null)
 
@@ -16,6 +17,7 @@ export default function TodayPicksPopup() {
       const res = await getTodayPicks()
       if (res?.code === 0 && res.data?.items?.length > 0) {
         setPicks(res.data.items)
+        setSessionDate(res.data.date)
         // Only show if not dismissed in this session
         const dismissKey = `picks_dismissed_${res.data.date}`
         if (!sessionStorage.getItem(dismissKey)) {
@@ -56,13 +58,11 @@ export default function TodayPicksPopup() {
   const handleDismiss = () => {
     setVisible(false)
     setDismissed(true)
-    const today = new Date().toISOString().slice(0, 10)
-    sessionStorage.setItem(`picks_dismissed_${today}`, '1')
+    sessionStorage.setItem(`picks_dismissed_${sessionDate}`, '1')
   }
 
   const handleReopen = () => {
-    const today = new Date().toISOString().slice(0, 10)
-    sessionStorage.removeItem(`picks_dismissed_${today}`)
+    sessionStorage.removeItem(`picks_dismissed_${sessionDate}`)
     setVisible(true)
     setDismissed(false)
   }

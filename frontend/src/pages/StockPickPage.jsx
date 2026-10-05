@@ -2,22 +2,23 @@ import { useState, useEffect, useCallback } from 'react'
 import { listStockPicks, createStockPick, updateStockPick, deleteStockPick } from '../services/api'
 import { Plus, Trash2, RefreshCw, Megaphone, Edit3, X, Target, Eye, TrendingUp, Calendar, Check } from 'lucide-react'
 import toast from 'react-hot-toast'
+import { localDateStr } from '../utils/date'
 
 export default function StockPickPage() {
   const [picks, setPicks] = useState([])
   const [loading, setLoading] = useState(true)
-  const [filterDate, setFilterDate] = useState(new Date().toISOString().slice(0, 10))
+  const [filterDate, setFilterDate] = useState(localDateStr())
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({
     code: '', name: '', attention_low: '', attention_high: '',
-    target_low: '', target_high: '', reason: '', pick_date: new Date().toISOString().slice(0, 10)
+    target_low: '', target_high: '', reason: '', pick_date: localDateStr()
   })
 
-  const loadPicks = useCallback(async () => {
+  const loadPicks = useCallback(async (forceRefresh = false) => {
     setLoading(true)
     try {
-      const res = await listStockPicks({ date: filterDate, page_size: 100 })
+      const res = await listStockPicks({ date: filterDate, page_size: 100, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res?.code === 0) setPicks(res.data?.items || [])
     } catch (e) { console.error(e) }
     setLoading(false)
@@ -28,7 +29,7 @@ export default function StockPickPage() {
   const resetForm = () => {
     setForm({
       code: '', name: '', attention_low: '', attention_high: '',
-      target_low: '', target_high: '', reason: '', pick_date: new Date().toISOString().slice(0, 10)
+      target_low: '', target_high: '', reason: '', pick_date: localDateStr()
     })
     setEditing(null)
   }
@@ -40,7 +41,7 @@ export default function StockPickPage() {
       code: pick.code, name: pick.name,
       attention_low: pick.attention_low || '', attention_high: pick.attention_high || '',
       target_low: pick.target_low || '', target_high: pick.target_high || '',
-      reason: pick.reason || '', pick_date: pick.pick_date || new Date().toISOString().slice(0, 10)
+      reason: pick.reason || '', pick_date: pick.pick_date || localDateStr()
     })
     setEditing(pick)
     setShowForm(true)
@@ -98,7 +99,7 @@ export default function StockPickPage() {
         <div className="flex items-center gap-2">
           <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
             className="px-3 py-2 rounded-lg border border-gray-200 text-xs focus:outline-none focus:border-[#513CC8]" />
-          <button onClick={loadPicks} className="p-2 rounded-lg text-gray-400 hover:text-[#513CC8] hover:bg-[#F0EDFA] transition">
+          <button onClick={() => loadPicks(true)} className="p-2 rounded-lg text-gray-400 hover:text-[#513CC8] hover:bg-[#F0EDFA] transition">
             <RefreshCw size={16} />
           </button>
           <button onClick={handleCreate}

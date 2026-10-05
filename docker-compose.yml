@@ -5,12 +5,12 @@ services:
     image: mysql:8.0
     container_name: quantmind-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: quantmind_root_2026
-      MYSQL_DATABASE: quantmind
-      MYSQL_USER: quantmind
-      MYSQL_PASSWORD: quantmind123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-quantmind_root_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-quantmind}
+      MYSQL_USER: ${MYSQL_USER:-quantmind}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-quantmind123}
     ports:
-      - "3306:3306"
+      - "127.0.0.1:3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     networks:
@@ -27,9 +27,12 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management
     container_name: quantmind-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-quantmind}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-quantmind_mq_2026}
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     networks:
@@ -54,19 +57,22 @@ services:
       DB_DRIVER: mysql
       DB_HOST: mysql
       DB_PORT: "3306"
-      DB_USER: quantmind
-      DB_PASSWORD: quantmind123
-      DB_NAME: quantmind
+      DB_USER: ${MYSQL_USER:-quantmind}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-quantmind123}
+      DB_NAME: ${MYSQL_DATABASE:-quantmind}
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: "5672"
-      RABBITMQ_USER: guest
-      RABBITMQ_PASSWORD: guest
-      JWT_SECRET: quantmind-secret-key-2026
-      ADMIN_USER: admin
-      ADMIN_PASSWORD: "Admin@2026!"
+      RABBITMQ_USER: ${RABBITMQ_USER:-quantmind}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-quantmind_mq_2026}
+      JWT_SECRET: ${JWT_SECRET:-quantmind-secret-key-2026}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-Admin@2026!}
       AKSHARE_SERVICE_URL: "http://akshare:9090"
+      PAGE_CACHE_DIR: "/app/temp/pages"
     ports:
-      - "8080:8080"
+      - "8004:8080"
+    volumes:
+      - ./temp:/app/temp
     depends_on:
       mysql:
         condition: service_healthy
@@ -90,7 +96,7 @@ services:
       network: host
     container_name: quantmind-akshare
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     networks:
       - quantmind-net
     restart: unless-stopped
@@ -111,7 +117,7 @@ services:
       network: host
     container_name: quantmind-frontend
     ports:
-      - "80:80"
+      - "3004:80"
     depends_on:
       - backend
     networks:

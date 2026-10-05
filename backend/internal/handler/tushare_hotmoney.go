@@ -101,17 +101,23 @@ func hotMoneySchedulerRun() {
 // BackfillHotMoneyData backfills dragon tiger data for the past N trading days
 func BackfillHotMoneyData(days int) {
 	loc, _ := time.LoadLocation("Asia/Shanghai")
-	now := time.Now().In(loc)
+	anchor := time.Now().In(loc)
+	// Anchor on the session the market actually traded last, otherwise a 长假
+	// backfill burns its whole budget on dates with no 龙虎榜 at all.
+	if latest, err := getLatestTradingDate(); err == nil {
+		if parsed, perr := time.ParseInLocation("20060102", latest, loc); perr == nil {
+			anchor = parsed
+		}
+	}
+
+	// 场次来自交易所日历：按星期几回看会把中秋这类落在工作日的假日（2026-09-25）当成交易日。
+	sessions := derivedSessionChain(anchor.Format("20060102"), days*2)
 
 	log.Printf("[HotMoney] Starting backfill for past %d trading days", days)
 	filled := 0
 
-	for i := 0; i < days*2 && filled < days; i++ {
-		d := now.AddDate(0, 0, -i)
-		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
-			continue
-		}
-		tradeDate := d.Format("20060102")
+	for i := len(sessions) - 1; i >= 0 && filled < days; i-- {
+		tradeDate := sessions[i]
 
 		// Check if data exists
 		var count int64
@@ -315,7 +321,7 @@ func (h *Handler) GetHotMoneyBoard(c *gin.Context) {
 		fetched := false
 		candidates := []string{tradeDate}
 		if count == 0 {
-			now := time.Now()
+			now := sessionAnchor()
 			for i := 1; i <= 7; i++ {
 				d := now.AddDate(0, 0, -i)
 				if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -518,12 +524,12 @@ func (h *Handler) GetHotMoneyBoard(c *gin.Context) {
 			amt = s.SellAmt
 		}
 		scrollList = append(scrollList, gin.H{
-			"trader":  s.TraderName,
-			"stock":   s.StockName,
-			"code":    s.StockCode,
-			"action":  action,
-			"amount":  amt,
-			"net_amt": s.NetAmt,
+			"trader":   s.TraderName,
+			"stock":    s.StockName,
+			"code":     s.StockCode,
+			"action":   action,
+			"amount":   amt,
+			"net_amt":  s.NetAmt,
 			"is_known": s.IsKnown,
 		})
 	}

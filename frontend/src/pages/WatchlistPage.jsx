@@ -528,9 +528,9 @@ export default function WatchlistPage() {
   const [gubaHasMore, setGubaHasMore] = useState(true)
   const gubaScrollRef = useRef(null)
 
-  const loadStocks = useCallback(async () => {
+  const loadStocks = useCallback(async (forceRefresh = false) => {
     try {
-      const res = await getWatchlistQuotes()
+      const res = await getWatchlistQuotes(forceRefresh ? { refresh: 'true' } : undefined)
       if (res.code === 0) setStocks(res.data || [])
     } catch (e) {
       console.error(e)
@@ -562,7 +562,7 @@ export default function WatchlistPage() {
         const res = await getChipDistribution({ code })
         if (res.code === 0) setChipData(res.data)
       } else if (tab === 'fundflow') {
-        const res = await getStockFundFlow({ code })
+        const res = await getStockFundFlow({ code, days: 120 })
         if (res.code === 0) setFundFlowData(res.data)
       }
     } catch (e) {
@@ -572,7 +572,7 @@ export default function WatchlistPage() {
   }
 
   // Load Guba discussion data
-  const loadGubaData = useCallback(async (stockCode, pageNum = 1, append = false) => {
+  const loadGubaData = useCallback(async (stockCode, pageNum = 1, append = false, forceRefresh = false) => {
     if (!stockCode) return
     if (pageNum === 1) {
       setGubaLoading(true)
@@ -580,7 +580,7 @@ export default function WatchlistPage() {
       setGubaLoadingMore(true)
     }
     try {
-      const res = await getGubaDiscussion({ code: stockCode, page: pageNum, page_size: 20 })
+      const res = await getGubaDiscussion({ code: stockCode, page: pageNum, page_size: 20, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res?.code === 0 && res.data) {
         const newPosts = res.data.posts || []
         if (append) {
@@ -614,7 +614,7 @@ export default function WatchlistPage() {
     setGubaPosts([])
     setGubaPage(1)
     setGubaHasMore(true)
-    await loadGubaData(detailStock.code, 1, false)
+    await loadGubaData(detailStock.code, 1, false, true)
     toast.success('股吧讨论已刷新')
     if (gubaScrollRef.current) gubaScrollRef.current.scrollTop = 0
   }
@@ -739,7 +739,7 @@ export default function WatchlistPage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    loadStocks()
+    loadStocks(true)
   }
 
   const formatAmount = (v) => {
@@ -839,7 +839,8 @@ export default function WatchlistPage() {
           <ResponsiveContainer width="100%" height={180}>
             <BarChart data={klines}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="date" tick={{fontSize: 9, fill: '#9CA3AF'}} tickFormatter={v => v?.slice(5)} />
+              <XAxis dataKey="date" tick={{fontSize: 9, fill: '#9CA3AF'}} tickFormatter={v => v?.slice(5)}
+                interval={Math.max(0, Math.floor((fundFlowData.klines?.length || 1) / 8))} />
               <YAxis tick={{fontSize: 9, fill: '#9CA3AF'}} />
               <Tooltip contentStyle={tooltipStyle} formatter={(v, name) => {
                 const labels = { main_net: '主力净流入', retail_net: '散户净流入' }

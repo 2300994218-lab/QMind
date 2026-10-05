@@ -3,6 +3,8 @@ FROM python:3.11-slim
 WORKDIR /app
 
 # Install system dependencies for mootdx
+# Use the Alibaba Debian mirror to avoid slow/unreachable deb.debian.org connections in mainland China.
+RUN sed -i 's#deb.debian.org#mirrors.aliyun.com#g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*

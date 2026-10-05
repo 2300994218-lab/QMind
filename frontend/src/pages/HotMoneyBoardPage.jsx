@@ -577,7 +577,7 @@ function StockDetailPanel({ code, stockInfo, onClose }) {
         }
         case 'daily': { const res = await getChipDistribution({ code }); if (res?.code === 0) setDailyKline(res.data); break }
         case 'weekly': { const res = await getKLineRealtime({ code, period: 'weekly' }); if (res?.code === 0) setWeeklyKline(res.data); break }
-        case 'fund': { const res = await getStockFundFlow({ code }); if (res?.code === 0) setFundFlow(res.data); break }
+        case 'fund': { const res = await getStockFundFlow({ code, days: 120 }); if (res?.code === 0) setFundFlow(res.data); break }
         case 'guba': { const res = await getGubaDiscussion({ code }); if (res?.code === 0) setGubaData(res.data); break }
       }
     } catch (e) { console.error('Stock detail fetch error:', e) }
@@ -813,28 +813,116 @@ function ChipBarChart({ chips, currentPrice, chipSummary }) {
   )
 }
 
+function formatKlineDate(value) {
+  if (!value) return '-'
+  const text = String(value)
+  if (/^\d{8}$/.test(text)) return `${text.slice(4, 6)}-${text.slice(6, 8)}`
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(5, 10)
+  return text.length > 10 ? text.slice(0, 10) : text
+}
+
+function getKlineDate(item) {
+  return item?.date || item?.trade_date || item?.time || item?.timestamp
+}
+
+function formatNumeric(value, digits = 2) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number.toFixed(digits) : '-'
+}
+
+function formatPriceTick(value) {
+  if (!Number.isFinite(value)) return '-'
+  if (Math.abs(value) >= 100) return value.toFixed(0)
+  if (Math.abs(value) >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+function buildPriceTicks(minPrice, maxPrice, count = 5) {
+  const range = Math.max(maxPrice - minPrice, Math.abs(maxPrice) * 0.02, 0.01)
+  const paddedMin = Math.max(0, minPrice - range * 0.05)
+  const paddedMax = maxPrice + range * 0.05
+  const step = (paddedMax - paddedMin) / (count - 1)
+  return {
+    min: paddedMin,
+    max: paddedMax,
+    ticks: Array.from({ length: count }, (_, index) => paddedMax - step * index),
+  }
+}
+
+function KlineAxisChart({ klines, period }) {
+  const normalized = klines.map((item, index) => {
+    const close = Number(item.close) || 0
+    const open = Number(item.open) || close
+    const high = Number(item.high) || Math.max(open, close)
+    const low = Number(item.low) || Math.min(open, close)
+    return { ...item, index, open, close, high, low }
+  }).filter(item => Number.isFinite(item.high) && Number.isFinite(item.low))
+
+  if (normalized.length === 0) return <EmptyState text={`暂无${period}线数据`} />
+
+  const minPrice = Math.min(...normalized.map(item => item.low))
+  const maxPrice = Math.max(...normalized.map(item => item.high))
+  const axis = buildPriceTicks(minPrice, maxPrice)
+  const xTickCount = Math.min(6, normalized.length)
+  const xTickIndexes = xTickCount === 1
+    ? [0]
+    : Array.from({ length: xTickCount }, (_, index) => Math.round(index * (normalized.length - 1) / (xTickCount - 1)))
+  const priceToTop = price => ((axis.max - price) / (axis.max - axis.min)) * 100
+
+  return (
+    <div className="flex min-w-0">
+      {/* Y-axis: price scale */}
+      <div className="relative w-12 shrink-0 pr-1">
+        <div className="absolute -left-1 top-1/2 -translate-y-1/2 -rotate-90 origin-center text-[9px] text-gray-400 whitespace-nowrap">价格（元）</div>
+        <div className="h-52 flex flex-col justify-between pt-1 pb-1 pl-4 text-[9px] leading-none text-gray-500 text-right">
+          {axis.ticks.map((tick, index) => <span key={index}>{formatPriceTick(tick)}</span>)}
+        </div>
+      </div>
+
+      {/* Plot + X-axis: date scale */}
+      <div className="min-w-0 flex-1">
+        <div className="relative h-52 rounded-lg border border-gray-100 bg-gray-50 overflow-hidden px-1">
+          {axis.ticks.map((tick, index) => (
+            <div key={`grid-${index}`} className="absolute left-1 right-1 border-t border-dashed border-gray-200/80" style={{ top: `${priceToTop(tick)}%` }} />
+          ))}
+          <div className="absolute left-1 top-0 bottom-0 border-l border-gray-300/80" aria-hidden="true" />
+          <div className="absolute left-1 right-1 bottom-0 border-b border-gray-300/80" aria-hidden="true" />
+          <div className="relative z-[1] h-full flex items-end">
+            {normalized.map((k, index) => {
+              const isUp = k.close >= k.open
+              const wickTop = priceToTop(k.high)
+              const wickHeight = Math.max(0.5, priceToTop(k.low) - wickTop)
+              const bodyTop = priceToTop(Math.max(k.open, k.close))
+              const bodyHeight = Math.max(1, Math.abs(k.close - k.open) / (axis.max - axis.min) * 100)
+              return (
+                <div key={`${getKlineDate(k) || 'kline'}-${index}`} className="flex-1 relative mx-px h-full" title={`${formatKlineDate(getKlineDate(k))} 开 ${formatPriceTick(k.open)} 高 ${formatPriceTick(k.high)} 低 ${formatPriceTick(k.low)} 收 ${formatPriceTick(k.close)}`}>
+                  <div className="absolute left-1/2 -translate-x-1/2 w-px" style={{ top: `${wickTop}%`, height: `${wickHeight}%`, background: isUp ? '#ef4444' : '#22c55e' }} />
+                  <div className="absolute left-0 right-0 rounded-sm" style={{ top: `${bodyTop}%`, height: `${bodyHeight}%`, background: isUp ? '#ef4444' : '#22c55e', minHeight: '1px' }} />
+                </div>
+              )
+            })}
+          </div>
+        </div>
+        <div className="relative h-6 text-[9px] text-gray-500">
+          {xTickIndexes.map((itemIndex, tickIndex) => {
+            const left = xTickIndexes.length === 1 ? 0 : itemIndex / (normalized.length - 1) * 100
+            const transform = tickIndex === 0 ? 'translateX(0)' : tickIndex === xTickIndexes.length - 1 ? 'translateX(-100%)' : 'translateX(-50%)'
+            return <span key={itemIndex} className="absolute top-1 whitespace-nowrap" style={{ left: `${left}%`, transform }}>{formatKlineDate(getKlineDate(normalized[itemIndex]))}</span>
+          })}
+        </div>
+        <div className="text-center text-[9px] text-gray-400">时间 / 日期（横轴）</div>
+      </div>
+    </div>
+  )
+}
+
 function ChipKlineView({ data, period }) {
   if (!data?.klines || data.klines.length === 0) return <EmptyState text={`暂无${period}线数据`} />
   const klines = data.klines.slice(-60)
   return (
     <div className="space-y-3">
       <div className="text-xs text-gray-500">{period}线 (近{klines.length}根) {data.chip_data && <span className="text-[#513CC8]">含筹码分布</span>}</div>
-      <div className="h-52 bg-gray-50 rounded-lg border border-gray-100 overflow-hidden flex items-end px-1">
-        {klines.map((k, i) => {
-          const maxH = Math.max(...klines.map(x => x.high))
-          const minL = Math.min(...klines.map(x => x.low))
-          const r = maxH - minL || 1
-          const top = ((maxH - Math.max(k.open, k.close)) / r) * 100
-          const bodyH = Math.max(1, (Math.abs(k.close - k.open) / r) * 100)
-          const isUp = k.close >= k.open
-          return (
-            <div key={i} className="flex-1 relative mx-px" style={{ height: '100%' }}>
-              <div className="absolute left-1/2 -translate-x-1/2 w-px" style={{ top: `${((maxH - k.high) / r) * 100}%`, height: `${((k.high - k.low) / r) * 100}%`, background: isUp ? '#ef4444' : '#22c55e' }} />
-              <div className="absolute left-0 right-0 rounded-sm" style={{ top: `${top}%`, height: `${bodyH}%`, background: isUp ? '#ef4444' : '#22c55e', minHeight: '1px' }} />
-            </div>
-          )
-        })}
-      </div>
+      <KlineAxisChart klines={klines} period={period} />
       {data.chip_data?.length > 0 && (
         <div className="rounded-lg p-3 border" style={{ background: '#F9F8FC', borderColor: '#E8E3F8' }}>
           <p className="text-xs font-medium mb-2" style={{ color: '#513CC8' }}>筹码分布概要</p>
@@ -852,32 +940,18 @@ function ChipKlineView({ data, period }) {
 function WeeklyKlineView({ data }) {
   if (!data?.klines || data.klines.length === 0) return <EmptyState text="暂无周K线数据" />
   const klines = data.klines.slice(-40)
+  const latest = klines[klines.length - 1] || {}
   return (
     <div className="space-y-3">
       <div className="text-xs text-gray-500">周K线 (近{klines.length}周)</div>
-      <div className="h-52 bg-gray-50 rounded-lg border border-gray-100 overflow-hidden flex items-end px-1">
-        {klines.map((k, i) => {
-          const maxH = Math.max(...klines.map(x => x.high))
-          const minL = Math.min(...klines.map(x => x.low))
-          const r = maxH - minL || 1
-          const top = ((maxH - Math.max(k.open, k.close)) / r) * 100
-          const bodyH = Math.max(1, (Math.abs(k.close - k.open) / r) * 100)
-          const isUp = k.close >= k.open
-          return (
-            <div key={i} className="flex-1 relative mx-px" style={{ height: '100%' }}>
-              <div className="absolute left-1/2 -translate-x-1/2 w-px" style={{ top: `${((maxH - k.high) / r) * 100}%`, height: `${((k.high - k.low) / r) * 100}%`, background: isUp ? '#ef4444' : '#22c55e' }} />
-              <div className="absolute left-0 right-0 rounded-sm" style={{ top: `${top}%`, height: `${bodyH}%`, background: isUp ? '#ef4444' : '#22c55e', minHeight: '1px' }} />
-            </div>
-          )
-        })}
-      </div>
+      <KlineAxisChart klines={klines} period="周" />
       {klines.length > 0 && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
           {[
-            { label: '最新收盘', value: klines[klines.length-1]?.close?.toFixed(2), color: 'text-gray-800' },
-            { label: '周最高', value: klines[klines.length-1]?.high?.toFixed(2), color: 'text-red-500' },
-            { label: '周最低', value: klines[klines.length-1]?.low?.toFixed(2), color: 'text-green-600' },
-            { label: '成交量', value: formatAmt(klines[klines.length-1]?.vol), color: 'text-gray-700' },
+            { label: '最新收盘', value: formatNumeric(latest.close), color: 'text-gray-800' },
+            { label: '周最高', value: formatNumeric(latest.high), color: 'text-red-500' },
+            { label: '周最低', value: formatNumeric(latest.low), color: 'text-green-600' },
+            { label: '成交量', value: formatAmt(latest.vol ?? latest.volume), color: 'text-gray-700' },
           ].map((item, i) => (
             <div key={i} className="bg-gray-50 rounded p-2 text-center">
               <span className="text-gray-500">{item.label}</span>
@@ -891,16 +965,26 @@ function WeeklyKlineView({ data }) {
 }
 
 function FundFlowView({ data }) {
-  if (!data?.items || data.items.length === 0) return <EmptyState text="暂无主力资金数据" />
+  // The stock fund-flow endpoint returns `klines`; keep compatibility with
+  // the older `items` shape used by some cached responses.
+  const items = data?.klines || data?.items || []
+  if (items.length === 0) return <EmptyState text="暂无主力资金数据" />
+  const latest = items[items.length - 1] || {}
+  const summary = data.summary || {
+    main_net: latest.main_net,
+    super_net: latest.super_big,
+    big_net: latest.big,
+    small_net: latest.mid,
+  }
   return (
     <div className="space-y-3">
-      {data.summary && (
+      {summary && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
           {[
-            { label: '主力净流入', value: data.summary.main_net },
-            { label: '超大单', value: data.summary.super_net },
-            { label: '大单', value: data.summary.big_net },
-            { label: '中小单', value: data.summary.small_net },
+            { label: '主力净流入', value: summary.main_net },
+            { label: '超大单', value: summary.super_net },
+            { label: '大单', value: summary.big_net },
+            { label: '中小单', value: summary.small_net },
           ].map((item, i) => (
             <div key={i} className="bg-gray-50 rounded-lg p-2 text-center">
               <div className="text-[10px] text-gray-500">{item.label}</div>
@@ -920,7 +1004,7 @@ function FundFlowView({ data }) {
             </tr>
           </thead>
           <tbody>
-            {data.items.slice(0, 20).map((item, idx) => (
+            {items.slice().reverse().slice(0, 20).map((item, idx) => (
               <tr key={idx} className="border-t border-gray-50 hover:bg-gray-50">
                 <td className="px-2 py-1.5 text-gray-700">{item.date}</td>
                 <td className={`px-2 py-1.5 text-right font-mono ${item.main_net >= 0 ? 'text-red-500' : 'text-green-600'}`}>{formatAmt(item.main_net)}</td>
@@ -985,9 +1069,9 @@ export default function HotMoneyBoardPage() {
     }
   }, [boardData])
 
-  const fetchDates = async () => {
+  const fetchDates = async (forceRefresh = false) => {
     try {
-      const res = await getHotMoneyDates({ limit: 90 })
+      const res = await getHotMoneyDates({ limit: 90, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res?.code === 0 && res.data?.dates) {
         setDates(res.data.dates)
         if (res.data.dates.length > 0 && !tradeDate) {
@@ -997,10 +1081,11 @@ export default function HotMoneyBoardPage() {
     } catch (e) { console.error(e) }
   }
 
-  const fetchBoard = async () => {
+  const fetchBoard = async (forceRefresh = false) => {
     setLoading(true)
     try {
-      const params = { sort: sortBy, refresh: 'true' }
+      const params = { sort: sortBy }
+      if (forceRefresh) params.refresh = 'true'
       if (tradeDate) params.trade_date = tradeDate
       const res = await getHotMoneyBoard(params)
       if (res?.code === 0) {
@@ -1013,7 +1098,7 @@ export default function HotMoneyBoardPage() {
           }
         }
         // Refresh dates list after fetching (new date may have been added)
-        fetchDates()
+        fetchDates(true)
       }
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
@@ -1052,12 +1137,12 @@ export default function HotMoneyBoardPage() {
         <div className="flex items-center gap-3">
           {/* Modern Calendar Picker - Grid Style */}
           <CalendarPicker dates={dates} tradeDate={tradeDate} onChange={setTradeDate} />
-          <button onClick={() => { hotMoneyBackfill({ days: 30 }).then(fetchDates) }}
+          <button onClick={() => { hotMoneyBackfill({ days: 30 }).then(() => fetchDates(true)) }}
             title="回补历史数据(近30个交易日)"
             className="p-2 rounded-lg transition hover:bg-[#F0EDFA] text-gray-400 hover:text-[#513CC8]">
             <Download size={16} />
           </button>
-          <button onClick={fetchBoard}
+          <button onClick={() => fetchBoard(true)}
             className="p-2 rounded-lg transition hover:bg-[#F0EDFA]" style={{ color: '#513CC8' }}>
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
           </button>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { getStrategySignals } from '../services/api'
 import { Zap, Filter } from 'lucide-react'
+import { localDateStr } from '../utils/date'
 
 const STRATEGY_OPTIONS = [
   { value: '', label: '全部策略' },
@@ -18,7 +19,7 @@ const STRATEGY_OPTIONS = [
 export default function SignalsPage() {
   const [signals, setSignals] = useState([])
   const [strategy, setStrategy] = useState('')
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [date, setDate] = useState(localDateStr())
   const [loading, setLoading] = useState(false)
 
   useEffect(() => { loadSignals() }, [strategy, date])

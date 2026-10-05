@@ -56,37 +56,40 @@ type TsDragonTigerInst struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// 涨跌停/炸板榜单一次给全。一场最多几百只涨停，截在 50 会让榜单和"涨停 N 家"的计数对不上。
+const limitBoardListCap = 500
+
 // TsLimitList stores 涨跌停和炸板 (limit_list_d / limit_list_ths)
 type TsLimitList struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	TradeDate     string    `gorm:"size:10;index:idx_ts_ll_date" json:"trade_date"`
-	TsCode        string    `gorm:"size:20;index:idx_ts_ll_code" json:"ts_code"`
-	Industry      string    `gorm:"size:100" json:"industry"`
-	Name          string    `gorm:"size:50" json:"name"`
-	Close         float64   `json:"close"`
-	PctChg        float64   `json:"pct_chg"`
-	Amount        float64   `json:"amount"`
-	LimitAmount   float64   `json:"limit_amount"`
-	FloatMv       float64   `json:"float_mv"`
-	TotalMv       float64   `json:"total_mv"`
-	TurnoverRatio float64   `json:"turnover_ratio"`
-	FdAmount      float64   `json:"fd_amount"`
-	FirstTime     string    `gorm:"size:20" json:"first_time"`
-	LastTime      string    `gorm:"size:20" json:"last_time"`
-	OpenTimes     int       `json:"open_times"`
-	UpStat        string    `gorm:"size:20" json:"up_stat"`
-	LimitTimes    int       `json:"limit_times"`
-	Limit         string    `gorm:"size:5;index:idx_ts_ll_limit" json:"limit"` // U/D/Z
+	ID            uint    `gorm:"primaryKey" json:"id"`
+	TradeDate     string  `gorm:"size:10;index:idx_ts_ll_date" json:"trade_date"`
+	TsCode        string  `gorm:"size:20;index:idx_ts_ll_code" json:"ts_code"`
+	Industry      string  `gorm:"size:100" json:"industry"`
+	Name          string  `gorm:"size:50" json:"name"`
+	Close         float64 `json:"close"`
+	PctChg        float64 `json:"pct_chg"`
+	Amount        float64 `json:"amount"`
+	LimitAmount   float64 `json:"limit_amount"`
+	FloatMv       float64 `json:"float_mv"`
+	TotalMv       float64 `json:"total_mv"`
+	TurnoverRatio float64 `json:"turnover_ratio"`
+	FdAmount      float64 `json:"fd_amount"`
+	FirstTime     string  `gorm:"size:20" json:"first_time"`
+	LastTime      string  `gorm:"size:20" json:"last_time"`
+	OpenTimes     int     `json:"open_times"`
+	UpStat        string  `gorm:"size:20" json:"up_stat"`
+	LimitTimes    int     `json:"limit_times"`
+	Limit         string  `gorm:"size:5;index:idx_ts_ll_limit" json:"limit"` // U/D/Z
 	// New fields from limit_list_ths (同花顺涨跌停榜单)
-	Tag           string    `gorm:"size:200" json:"tag"`            // 涨停标签（概念/题材）
-	Status        string    `gorm:"size:50" json:"status"`          // 涨停状态（N连板、一字板、换手板、T字板）
-	LuDesc        string    `gorm:"size:500" json:"lu_desc"`        // 涨停原因
-	LimitType     string    `gorm:"size:20" json:"limit_type"`      // 板单类别（涨停池、跌停池、炸板池、连扳池）
-	LimitOrder    float64   `json:"limit_order"`                    // 封单量(元)
-	Turnover      float64   `json:"turnover"`                       // 成交额(元)
-	RiseRate      float64   `json:"rise_rate"`                      // 涨速(%)
-	DataSource    string    `gorm:"size:10" json:"data_source"`     // 数据来源: ths/tushare
-	CreatedAt     time.Time `json:"created_at"`
+	Tag        string    `gorm:"size:200" json:"tag"`        // 涨停标签（概念/题材）
+	Status     string    `gorm:"size:50" json:"status"`      // 涨停状态（N连板、一字板、换手板、T字板）
+	LuDesc     string    `gorm:"size:500" json:"lu_desc"`    // 涨停原因
+	LimitType  string    `gorm:"size:20" json:"limit_type"`  // 板单类别（涨停池、跌停池、炸板池、连扳池）
+	LimitOrder float64   `json:"limit_order"`                // 封单量(元)
+	Turnover   float64   `json:"turnover"`                   // 成交额(元)
+	RiseRate   float64   `json:"rise_rate"`                  // 涨速(%)
+	DataSource string    `gorm:"size:10" json:"data_source"` // 数据来源: ths/tushare
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // TsLimitStep stores 连板天梯 (limit_step)
@@ -642,25 +645,22 @@ func formatTradeDateForDisplay(d string) string {
 
 func normTradeDate(d string) string {
 	d = strings.ReplaceAll(d, "-", "")
-	if len(d) == 8 {
-		return d
+	if len(d) != 8 {
+		d = findLatestTradeDateStr()
 	}
-	return findLatestTradeDateStr()
-}
-
-// findLatestLimitListDate returns the most recent trade_date in ts_limit_lists DB
-// This is used as fallback when the API is rate-limited
-func findLatestLimitListDate() string {
-	var item TsLimitList
-	if err := repository.DB.Order("trade_date DESC").First(&item).Error; err == nil {
-		return item.TradeDate
+	// Live sources mirror the most recent session, so a weekend/holiday request must
+	// not be labelled with a date that has no market data.
+	if latest, err := getLatestTradingDate(); err == nil && len(latest) == 8 && d > latest {
+		log.Printf("[交易日] %s 休市或尚无行情，改用最近交易日 %s", d, latest)
+		return latest
 	}
-	return ""
+	return d
 }
 
 // ensureLimitListData guarantees limit_list data is available for a trade date.
 // Priority: limit_list_ths (同花顺, richer fields, higher rate limit) > limit_list_d (Tushare classic)
-// Returns the effective trade_date (may differ if data was found on a different date).
+// > the 交易所涨停价 derivation, which fills the row in the background. The returned date is
+// always the requested one: rows are never borrowed from a neighbouring session.
 func ensureLimitListData(tradeDate string, refresh bool) string {
 	var count int64
 	repository.DB.Model(&TsLimitList{}).Where("trade_date = ?", tradeDate).Count(&count)
@@ -688,34 +688,10 @@ func ensureLimitListData(tradeDate string, refresh bool) string {
 		return tradeDate // Still have existing data
 	}
 
-	// Check DB for any recent date's data
-	if latestDate := findLatestLimitListDate(); latestDate != "" {
-		log.Printf("[LimitList] Using cached data from %s", latestDate)
-		return latestDate
-	}
-
-	// Last resort: try previous trading days
-	now := time.Now()
-	for i := 1; i <= 3; i++ {
-		d := now.AddDate(0, 0, -i)
-		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
-			continue
-		}
-		candidate := d.Format("20060102")
-		if candidate != tradeDate {
-			repository.DB.Model(&TsLimitList{}).Where("trade_date = ?", candidate).Count(&count)
-			if count > 0 {
-				return candidate
-			}
-			// Try THS first, then classic
-			if fetchAndSaveLimitListThs(candidate) {
-				return candidate
-			}
-			if !isLimitListRateLimited() && fetchAndSaveLimitList(candidate) {
-				return candidate
-			}
-		}
-	}
+	// Nothing for this session. Serving another date's rows here would label one day's
+	// 涨跌停 as another's, so the requested date is returned unchanged and the 交易所涨停价
+	// derivation runs in the background to fill it in.
+	startDerivedLimitLists(tradeDate)
 	return tradeDate
 }
 
@@ -744,7 +720,7 @@ func (h *Handler) GetTsDragonTiger(c *gin.Context) {
 		candidates := []string{tradeDate}
 		if count == 0 {
 			// Also try previous trading days
-			now := time.Now()
+			now := sessionAnchor()
 			for i := 1; i <= 7; i++ {
 				d := now.AddDate(0, 0, -i)
 				if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -1082,6 +1058,125 @@ func fetchAndSaveDragonTiger(tradeDate string) bool {
 
 // ==================== 2. 涨停榜 (limit_list_d, limit_type=U) ====================
 
+// limitBoardRows serves the 涨跌停 lists from real rows only.
+//
+// limit_up_boards mixes two kinds of content: the optional demo seed writes the legacy
+// 'limit_up'/'limit_down'/'broken' keys with invented prices, 连板数 and seal times,
+// while the live collectors write '*_rt' keys from market quotes. Reading the legacy
+// keys made the dashboard present fabricated stocks (and their fake 连板数) as real
+// data, so callers keep passing the legacy name and it is translated here; the legacy
+// rows themselves are never queried.
+//
+// Tushare's limit_list_d/limit_list_ths need permissions this account lacks, so the Sina
+// snapshot stands in for the missing lists - but only for the live session, since it
+// quotes the most recent trading day. A historical date returns nothing rather than
+// borrowed or fabricated rows.
+func limitBoardRows(displayDate, legacyLimitType, limitFlag string) []gin.H {
+	rows := boardRowsForType(displayDate, realBoardType(legacyLimitType), limitFlag)
+	if len(rows) > 0 {
+		return rows
+	}
+	if displayDate != currentSessionDate() {
+		return nil
+	}
+	return sinaLimitBoardRows(limitFlag)
+}
+
+// liveBoardDataSource labels the routes' fallback as market-quote data; every row also
+// carries its own finer-grained source.
+const liveBoardDataSource = "live_limit_board"
+
+// realBoardType maps a caller's legacy board key onto the live collector's key. 跌停 has
+// no collector yet, so it maps to "" and falls through to the snapshot.
+func realBoardType(legacyLimitType string) string {
+	switch legacyLimitType {
+	case "limit_up":
+		return "limit_up_rt"
+	case "broken":
+		return "broken_rt"
+	}
+	return ""
+}
+
+// realBoardTypes are the limit_up_boards keys written from market quotes. The legacy
+// 'limit_up'/'limit_down'/'broken' keys hold the optional demo seed rows.
+var realBoardTypes = []string{"limit_up_rt", "broken_rt"}
+
+func isRealBoardType(limitType string) bool {
+	for _, rt := range realBoardTypes {
+		if rt == limitType {
+			return true
+		}
+	}
+	return false
+}
+
+// boardRowSource keeps 采集器 rows labelled as they were, and lets a 推导补写行 say so.
+func boardRowSource(b model.LimitUpBoard) string {
+	if b.DataSource != "" {
+		return b.DataSource
+	}
+	return "live_board"
+}
+
+func boardRowsForType(displayDate, boardType, limitFlag string) []gin.H {
+	if boardType == "" {
+		return nil
+	}
+	var boards []model.LimitUpBoard
+	repository.DB.Where("trade_date = ? AND limit_type = ?", displayDate, boardType).
+		Order("board_count DESC, fund_amount DESC").Find(&boards)
+
+	rows := make([]gin.H, 0, len(boards))
+	for _, b := range boards {
+		rows = append(rows, gin.H{
+			"code": b.Code, "name": b.Name, "close": b.Price, "pct_chg": b.ChangePct,
+			"limit_times": b.BoardCount, "first_time": b.FirstTime, "last_time": b.LastTime,
+			"open_times": b.OpenCount, "net_flow": b.FundAmount, "concept": b.Concept,
+			"limit": limitFlag, "data_source": boardRowSource(b),
+		})
+	}
+	return rows
+}
+
+// sinaLimitBoardRows classifies 涨停/跌停 from the Sina snapshot. It carries no 连板数,
+// seal times or 炸板 signal, so those fields stay at their neutral values instead of
+// being estimated.
+func sinaLimitBoardRows(limitFlag string) []gin.H {
+	if limitFlag == "Z" {
+		return nil
+	}
+	up, down, err := fetchLimitUpDownFromSina()
+	if err != nil {
+		log.Printf("[LimitBoard] 新浪快照失败: %v", err)
+		return nil
+	}
+	src := up
+	if limitFlag == "D" {
+		src = down
+	}
+	rows, _ := src["stocks"].([]gin.H)
+	out := make([]gin.H, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, gin.H{
+			"code": r["code"], "name": r["name"], "close": r["close"], "pct_chg": r["change_pct"],
+			"limit_times": 0, "first_time": "", "last_time": "", "open_times": 0,
+			"net_flow": 0, "concept": r["industry"], "amount": r["amount"],
+			"turnover_ratio": r["turnover_rate"], "limit": limitFlag,
+			"data_source": "sina_snapshot",
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		pi, _ := out[i]["pct_chg"].(float64)
+		pj, _ := out[j]["pct_chg"].(float64)
+		if limitFlag == "D" {
+			return pi < pj
+		}
+		return pi > pj
+	})
+	return out
+}
+
 func (h *Handler) GetTsLimitUpList(c *gin.Context) {
 	tradeDate := normTradeDate(c.DefaultQuery("trade_date", ""))
 	refresh := c.DefaultQuery("refresh", "false") == "true"
@@ -1117,10 +1212,22 @@ func (h *Handler) GetTsLimitUpList(c *gin.Context) {
 		})
 	}
 
+	displayDate := formatTradeDateForDisplay(tradeDate)
+	dataSource := "tushare_limit_list"
+	if len(results) == 0 {
+		if fallback := limitBoardRows(displayDate, "limit_up", "U"); len(fallback) > 0 {
+			results = fallback
+			count = int64(len(results))
+			dataSource = liveBoardDataSource
+			log.Printf("[TsLimitUp] limit_list 无数据，改用实时涨跌停源 %s (%d 只)", displayDate, count)
+		}
+	}
+
 	response.Success(c, gin.H{
-		"trade_date": formatTradeDateForDisplay(tradeDate),
-		"items":      results,
-		"total":      count,
+		"trade_date":  displayDate,
+		"items":       results,
+		"total":       count,
+		"data_source": dataSource,
 	})
 }
 
@@ -1141,17 +1248,17 @@ func (h *Handler) GetTsLimitStats(c *gin.Context) {
 	// Top limit-up stocks
 	var upItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'U'", tradeDate).
-		Order("limit_times DESC, fd_amount DESC").Limit(50).Find(&upItems)
+		Order("limit_times DESC, fd_amount DESC").Limit(limitBoardListCap).Find(&upItems)
 
 	// Limit-down stocks
 	var downItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'D'", tradeDate).
-		Order("pct_chg ASC").Limit(50).Find(&downItems)
+		Order("pct_chg ASC").Limit(limitBoardListCap).Find(&downItems)
 
 	// Broken (炸板) stocks
 	var brokenItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'Z'", tradeDate).
-		Order("open_times DESC").Limit(50).Find(&brokenItems)
+		Order("open_times DESC").Limit(limitBoardListCap).Find(&brokenItems)
 
 	toList := func(items []TsLimitList) []gin.H {
 		list := []gin.H{}
@@ -1177,21 +1284,46 @@ func (h *Handler) GetTsLimitStats(c *gin.Context) {
 		return list
 	}
 
+	displayDate := formatTradeDateForDisplay(tradeDate)
+	dataSource := "tushare_limit_list"
+	upList, downList, brokenList := toList(upItems), toList(downItems), toList(brokenItems)
+	if len(upList) == 0 && len(downList) == 0 && len(brokenList) == 0 {
+		if fallback := limitBoardRows(displayDate, "limit_up", "U"); len(fallback) > 0 {
+			upList = fallback
+		}
+		if fallback := limitBoardRows(displayDate, "limit_down", "D"); len(fallback) > 0 {
+			downList = fallback
+		}
+		if fallback := limitBoardRows(displayDate, "broken", "Z"); len(fallback) > 0 {
+			brokenList = fallback
+		}
+		if len(upList)+len(downList)+len(brokenList) > 0 {
+			// The fallback lists only carry rows, so take the totals from the same
+			// robust source the dashboard uses to keep the two views in agreement.
+			// Each row keeps its own finer-grained data_source label.
+			upCount, downCount, brokenCount = fetchLimitCountsRobust(tradeDate, refresh)
+			dataSource = liveBoardDataSource
+			log.Printf("[TsLimitStats] limit_list 无数据，改用实时涨跌停源 %s (%d 只, U%d/D%d/Z%d)", displayDate, len(upList)+len(downList)+len(brokenList), upCount, downCount, brokenCount)
+		}
+	}
+
 	response.Success(c, gin.H{
-		"trade_date":    formatTradeDateForDisplay(tradeDate),
+		"trade_date":    displayDate,
 		"limit_up":      upCount,
 		"limit_down":    downCount,
 		"broken":        brokenCount,
-		"up_stocks":     toList(upItems),
-		"down_stocks":   toList(downItems),
-		"broken_stocks": toList(brokenItems),
+		"up_stocks":     upList,
+		"down_stocks":   downList,
+		"broken_stocks": brokenList,
+		"data_source":   dataSource,
 	})
 }
 
 // fetchAndSaveLimitListThs fetches limit_list_ths (同花顺涨跌停榜单) for all types and saves to DB
 // Returns true if any data was found. THS API has higher rate limit (500 calls/min) and richer fields.
 // Fields: ts_code, trade_date, name, close, pct_chg, tag, status, lu_desc, turnover_rate, rise_rate,
-//         turnover, limit_order, limit_amount, open_times, up_stat, first_time, last_time, limit_times
+//
+//	turnover, limit_order, limit_amount, open_times, up_stat, first_time, last_time, limit_times
 func fetchAndSaveLimitListThs(tradeDate string) bool {
 	allItems := make([]TsLimitList, 0, 200)
 
@@ -1216,6 +1348,9 @@ func fetchAndSaveLimitListThs(tradeDate string) bool {
 			"limit_type": lt.thsType,
 		}, "ts_code,trade_date,name,close,pct_chg,tag,status,lu_desc,turnover_rate,rise_rate,turnover,limit_order,limit_amount,open_times,up_stat,first_time,last_time,limit_times")
 		if err != nil {
+			if isPermissionSkipped(err) {
+				return false
+			}
 			log.Printf("[TsLimitListThs] limit_list_ths(%s) error for %s: %v", lt.thsType, tradeDate, err)
 			if isRateLimitError(err) {
 				log.Printf("[TsLimitListThs] Rate-limited, stopping THS fetch")
@@ -1425,6 +1560,28 @@ func (h *Handler) GetTsLimitStep(c *gin.Context) {
 		}
 	}
 
+	// Both Tushare tables are permission-gated, so fall back to the live board rows,
+	// which carry the 连板数 published by the exchange feed. The legacy 'limit_up' key
+	// is skipped: those rows are demo seed when seeding is enabled, and its 连板数 is
+	// invented, which would make this ladder look populated while telling a fiction.
+	if len(ladder) == 0 {
+		displayDate := formatTradeDateForDisplay(tradeDate)
+		var boards []model.LimitUpBoard
+		repository.DB.Where("trade_date = ? AND limit_type = ? AND board_count >= 2", displayDate, "limit_up_rt").
+			Order("board_count DESC").Find(&boards)
+		for _, b := range boards {
+			n := b.BoardCount
+			if n > maxNums {
+				maxNums = n
+			}
+			ladder[n] = append(ladder[n], gin.H{"code": b.Code, "name": b.Name, "nums": n})
+		}
+		if len(boards) > 0 {
+			count = int64(len(boards))
+			log.Printf("[TsLimitStep] 连板天梯改用实时涨停池 %s (%d 只)", displayDate, len(boards))
+		}
+	}
+
 	// Build ladder list sorted desc
 	ladderList := []gin.H{}
 	for n := maxNums; n >= 2; n-- {
@@ -1528,7 +1685,7 @@ func (h *Handler) GetTsStkAuction(c *gin.Context) {
 
 		if count == 0 {
 			// Try previous trading days
-			now := time.Now()
+			now := sessionAnchor()
 			for i := 1; i <= 5; i++ {
 				d := now.AddDate(0, 0, -i)
 				if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -1602,7 +1759,9 @@ func fetchAndSaveStkAuction(tradeDate string) bool {
 		"trade_date": tradeDate,
 	}, "ts_code,trade_date,vol,price,amount,pre_close,turnover_rate,volume_ratio,float_share")
 	if err != nil {
-		log.Printf("[TsStkAuction] error for %s: %v", tradeDate, err)
+		if !isPermissionSkipped(err) {
+			log.Printf("[TsStkAuction] error for %s: %v", tradeDate, err)
+		}
 		return false
 	}
 
@@ -1704,7 +1863,7 @@ func (h *Handler) GetTsMoneyflow(c *gin.Context) {
 
 		if count == 0 {
 			// Try previous trading days
-			now := time.Now()
+			now := sessionAnchor()
 			for i := 1; i <= 5; i++ {
 				d := now.AddDate(0, 0, -i)
 				if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -1749,14 +1908,14 @@ func (h *Handler) GetTsMoneyflow(c *gin.Context) {
 
 		results = append(results, gin.H{
 			"code": tsCodeToCode(item.TsCode), "name": item.Name,
-			"net_mf_amount":  item.NetMfAmount,
-			"main_in":        math.Round(mainIn*100) / 100,
-			"main_out":       math.Round(mainOut*100) / 100,
-			"main_net":       math.Round(mainNet*100) / 100,
-			"retail_in":      math.Round(retailIn*100) / 100,
-			"retail_out":     math.Round(retailOut*100) / 100,
-			"retail_net":     math.Round(retailNet*100) / 100,
-			"buy_elg_amount": item.BuyElgAmount,
+			"net_mf_amount":   item.NetMfAmount,
+			"main_in":         math.Round(mainIn*100) / 100,
+			"main_out":        math.Round(mainOut*100) / 100,
+			"main_net":        math.Round(mainNet*100) / 100,
+			"retail_in":       math.Round(retailIn*100) / 100,
+			"retail_out":      math.Round(retailOut*100) / 100,
+			"retail_net":      math.Round(retailNet*100) / 100,
+			"buy_elg_amount":  item.BuyElgAmount,
 			"sell_elg_amount": item.SellElgAmount,
 		})
 	}
@@ -1781,7 +1940,7 @@ func (h *Handler) getTsMoneyflowConcept(c *gin.Context, tradeDate string, refres
 		repository.DB.Model(&TsMoneyflowInd{}).Where("trade_date = ?", tradeDate).Count(&count)
 
 		if count == 0 {
-			now := time.Now()
+			now := sessionAnchor()
 			for i := 1; i <= 5; i++ {
 				d := now.AddDate(0, 0, -i)
 				if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
@@ -2014,7 +2173,7 @@ func (h *Handler) GetTsRealTimeStats(c *gin.Context) {
 	// Get limit-up stocks with board info for display
 	var limitUpStocks []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'U'", tradeDate).
-		Order("limit_times DESC, pct_chg DESC").Limit(50).Find(&limitUpStocks)
+		Order("limit_times DESC, pct_chg DESC").Limit(limitBoardListCap).Find(&limitUpStocks)
 
 	limitUps := []gin.H{}
 	for _, s := range limitUpStocks {
@@ -2038,7 +2197,7 @@ func (h *Handler) GetTsRealTimeStats(c *gin.Context) {
 	// Get broken stocks for display
 	var brokenStocks []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'Z'", tradeDate).
-		Order("open_times DESC").Limit(50).Find(&brokenStocks)
+		Order("open_times DESC").Limit(limitBoardListCap).Find(&brokenStocks)
 
 	brokens := []gin.H{}
 	for _, s := range brokenStocks {
@@ -2076,7 +2235,7 @@ func (h *Handler) GetTsRealTimeStats(c *gin.Context) {
 
 	// Use Eastmoney for real-time up/down/flat counts (they don't exist in Tushare)
 	upStockCount, downStockCount, flatStockCount = fetchMarketUpDownCounts()
-	totalAmount = fetchMarketTotalAmount() // returns in 亿
+	totalAmount = fetchMarketTotalAmount()  // returns in 亿
 	totalAmountWanYi := totalAmount / 10000 // 亿 -> 万亿 (for DB storage consistency)
 
 	// Persist to MarketSentiment in background (TotalAmount stored in 万亿)

@@ -1,13 +1,16 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"quantmind/internal/config"
@@ -15,6 +18,7 @@ import (
 	"quantmind/internal/middleware"
 	"quantmind/internal/mq"
 	"quantmind/internal/repository"
+	"quantmind/internal/version"
 	"quantmind/pkg/logger"
 
 	"github.com/gin-contrib/cors"
@@ -41,8 +45,11 @@ func main() {
 	mq.InitRabbitMQ(cfg)
 	defer mq.Close()
 
-	// Seed demo market data for past 7 days
-	handler.SeedDemoMarketData()
+	// Demo rows land in the real market tables with no flag distinguishing them, so
+	// seeding the last 7 weekdays (holidays included) would fake up the dashboards.
+	if os.Getenv("QMIND_SEED_DEMO_DATA") == "true" {
+		handler.SeedDemoMarketData()
+	}
 
 	// Seed 小樊精选 preset categories and stocks
 	handler.SeedXiaofanPresets()
@@ -59,6 +66,9 @@ func main() {
 	// Start AkShare Python microservice as fallback data source
 	go startAkShareService()
 
+	// 连板天梯/涨跌停榜 for closed sessions, derived from the exchange's own 涨停价
+	handler.WarmDerivedLimitLists()
+
 	// Gin
 	if cfg.GinMode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -69,8 +79,8 @@ func main() {
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept"},
-		ExposeHeaders:    []string{"Content-Length"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "Accept", "Cache-Control", "X-QuantMind-Page"},
+		ExposeHeaders:    []string{"Content-Length", "X-QuantMind-Cache", "X-QuantMind-Cache-Age"},
 		AllowCredentials: true,
 	}))
 
@@ -86,6 +96,7 @@ func main() {
 	auth := r.Group("/api")
 	auth.Use(middleware.AuthMiddleware())
 	auth.Use(middleware.AuditMiddleware())
+	auth.Use(middleware.NewPageCache(cfg.PageCacheDir).WithMarketFreeze(handler.MarketFreezeWindow).Middleware())
 	{
 		// Profile
 		auth.GET("/profile", h.GetProfile)
@@ -115,27 +126,27 @@ func main() {
 		auth.GET("/market/guba", h.GetGubaDiscussion)
 
 		// Tushare-backed dashboard data (落库+历史查询+刷新)
-		auth.GET("/market/ts-dragon-tiger", h.GetTsDragonTiger)       // 龙虎榜游资
-		auth.GET("/market/ts-limit-up", h.GetTsLimitUpList)           // 涨停榜
-		auth.GET("/market/ts-limit-stats", h.GetTsLimitStats)         // 涨跌停+炸板统计
-		auth.GET("/market/ts-limit-step", h.GetTsLimitStep)           // 连板天梯
-		auth.GET("/market/ts-auction", h.GetTsStkAuction)             // 集合竞价
-		auth.GET("/market/ts-moneyflow", h.GetTsMoneyflow)            // 资金流向
-		auth.GET("/market/ts-realtime-stats", h.GetTsRealTimeStats)   // Tushare实时统计
+		auth.GET("/market/ts-dragon-tiger", h.GetTsDragonTiger)     // 龙虎榜游资
+		auth.GET("/market/ts-limit-up", h.GetTsLimitUpList)         // 涨停榜
+		auth.GET("/market/ts-limit-stats", h.GetTsLimitStats)       // 涨跌停+炸板统计
+		auth.GET("/market/ts-limit-step", h.GetTsLimitStep)         // 连板天梯
+		auth.GET("/market/ts-auction", h.GetTsStkAuction)           // 集合竞价
+		auth.GET("/market/ts-moneyflow", h.GetTsMoneyflow)          // 资金流向
+		auth.GET("/market/ts-realtime-stats", h.GetTsRealTimeStats) // Tushare实时统计
 
 		// 看板大屏 - 大盘速览+涨跌分布+情绪温度
 		auth.GET("/market/dashboard-overview", h.GetDashboardOverview) // 大盘速览(指数/涨跌分布/情绪)
 
 		// 股市播报 & 财务播报
-		auth.GET("/market/broadcast", h.GetBroadcastMarket)           // 股市播报(ST/港通/盘前/公司)
-		auth.GET("/market/broadcast-finance", h.GetBroadcastFinance)  // 财务播报(利润/资产/现金流/预告/快报/审计/主营/指标)
-		auth.GET("/market/broadcast-search", h.GetBroadcastSearch)    // 股票搜索(快速搜索用)
+		auth.GET("/market/broadcast", h.GetBroadcastMarket)          // 股市播报(ST/港通/盘前/公司)
+		auth.GET("/market/broadcast-finance", h.GetBroadcastFinance) // 财务播报(利润/资产/现金流/预告/快报/审计/主营/指标)
+		auth.GET("/market/broadcast-search", h.GetBroadcastSearch)   // 股票搜索(快速搜索用)
 
 		// 游资打板专题
-		auth.GET("/market/hotmoney-board", h.GetHotMoneyBoard)        // 游资打板(滚动播报+游资列表)
-		auth.GET("/market/hotmoney-detail", h.GetHotMoneyDetail)      // 游资个股详情(选中个股后)
-		auth.GET("/market/hotmoney-dates", h.GetHotMoneyDates)        // 游资数据可用日期
-		auth.POST("/market/hotmoney-backfill", h.HotMoneyBackfill)    // 游资数据回补(管理员手动触发)
+		auth.GET("/market/hotmoney-board", h.GetHotMoneyBoard)     // 游资打板(滚动播报+游资列表)
+		auth.GET("/market/hotmoney-detail", h.GetHotMoneyDetail)   // 游资个股详情(选中个股后)
+		auth.GET("/market/hotmoney-dates", h.GetHotMoneyDates)     // 游资数据可用日期
+		auth.POST("/market/hotmoney-backfill", h.HotMoneyBackfill) // 游资数据回补(管理员手动触发)
 
 		// AI Stock Pick (杨永兴隔夜套利法)
 		auth.GET("/market/ai-stock-picks", h.GetAIStockPicks)
@@ -264,8 +275,18 @@ func main() {
 				c.Next()
 				return
 			}
+			// Clean("/"+path) drops any ".." before it can escape dist, so a decoded
+			// "%2e%2e%2f" request cannot read files outside the frontend folder.
+			filePath := filepath.Join(distPath, filepath.Clean("/"+c.Request.URL.Path))
+			// Vite fingerprints everything under /assets, so only index.html (and the
+			// SPA fallback) needs to be revalidated; without this a deploy would keep
+			// serving the previous bundle from the browser cache.
+			if strings.HasPrefix(c.Request.URL.Path, "/assets/") {
+				c.Header("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				c.Header("Cache-Control", "no-cache")
+			}
 			// Try to serve static file
-			filePath := filepath.Join(distPath, c.Request.URL.Path)
 			if _, err := os.Stat(filePath); err == nil && !isDir(filePath) {
 				c.File(filePath)
 				c.Abort()
@@ -279,7 +300,7 @@ func main() {
 		log.Printf("Frontend dist not found at %s, serving API only", distPath)
 	}
 
-	log.Printf("QuantMind Server starting on port %s", cfg.ServerPort)
+	log.Printf("QuantMind v%s Server starting on port %s", version.Version, cfg.ServerPort)
 	r.Run(":" + cfg.ServerPort)
 }
 
@@ -305,7 +326,8 @@ func startAkShareService() {
 
 	// Check if service is already reachable (Docker container or already running)
 	for attempt := 0; attempt < 10; attempt++ {
-		if resp, err := client.Get(akshareURL + "/health"); err == nil {
+		resp, err := client.Get(akshareURL + "/health")
+		if err == nil {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -319,6 +341,14 @@ func startAkShareService() {
 		}
 		// If AKSHARE_SERVICE_URL is explicitly set (Docker mode), just wait and retry
 		if os.Getenv("AKSHARE_SERVICE_URL") != "" {
+			// The container is managed externally, so a refused or unroutable
+			// connection will not fix itself: retrying it only spends 30s of every
+			// boot and fills the log. Keep retrying responses that say the service
+			// is up but unhealthy, which a starting container does produce.
+			if isMissingService(err) {
+				log.Printf("[AkShare] No service listening at %s (%v); start it with docker-compose to enable this source.", akshareURL, err)
+				return
+			}
 			log.Printf("[AkShare] Waiting for Docker service at %s (attempt %d/10)...", akshareURL, attempt+1)
 			time.Sleep(3 * time.Second)
 			continue
@@ -400,4 +430,31 @@ func startAkShareService() {
 		}
 	}
 	log.Println("[AkShare] WARNING: Service started but health check not passing after 15s")
+}
+
+// isMissingService tells an immediate connectivity failure - nobody is bound to
+// that address - apart from a slow or unhealthy service, which is worth retrying.
+// Go's net package returns the raw Winsock code on Windows while syscall's own
+// constants use its offset encoding, so both spellings are checked.
+func isMissingService(err error) bool {
+	if err == nil {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	switch errno {
+	case syscall.ECONNREFUSED, syscall.EHOSTUNREACH, syscall.ENETUNREACH:
+		return true
+	}
+	switch int(errno) {
+	case 10061, 10065: // WSAECONNREFUSED, WSAEHOSTUNREACH
+		return true
+	}
+	return false
 }

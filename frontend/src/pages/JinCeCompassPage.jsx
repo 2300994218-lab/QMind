@@ -58,7 +58,7 @@ export default function JinCeCompassPage() {
 
   const fetchKline = useCallback(async (stockCode) => {
     try {
-      const res = await getCompassKline({ code: stockCode, period })
+      const res = await getCompassKline({ code: stockCode, period, data_source: dataSource })
       if (res?.code === 0 && res?.data?.klines) {
         setKlineData(res.data)
         addLog('info', `K线加载完成: ${res.data.count}根 (${res.data.data_source})`)
@@ -66,7 +66,7 @@ export default function JinCeCompassPage() {
     } catch (e) {
       addLog('error', 'K线加载失败')
     }
-  }, [period])
+  }, [period, dataSource])
 
   const handleAnalyze = useCallback(async () => {
     if (!code.trim()) { toast.error('请输入股票代码'); return }
@@ -126,7 +126,7 @@ export default function JinCeCompassPage() {
     try {
       const res = await runCompassEvolution({
         code: code.trim(), name: stockName || '',
-        strategies: selectedStrategies, max_rounds: 3, period,
+        strategies: selectedStrategies, max_rounds: 3, period, data_source: dataSource,
       })
       if (res?.code === 0 && res?.data) {
         setEvolutionResult(res.data)
@@ -141,7 +141,7 @@ export default function JinCeCompassPage() {
       addLog('error', '进化失败: ' + e.message)
     }
     setEvolving(false)
-  }, [code, stockName, selectedStrategies, period])
+  }, [code, stockName, selectedStrategies, period, dataSource])
 
   const loadHistory = (record) => {
     setCode(record.code)
@@ -278,7 +278,7 @@ function ControlBar({ code, setCode, stockName, setStockName, period, setPeriod,
         <div>
           <label className="text-[10px] text-gray-500 mb-1 block">数据源</label>
           <div className="flex gap-1">
-            {[{k:'system',l:'系统'},{k:'akshare',l:'AkShare'},{k:'eastmoney',l:'东财'}].map(d => (
+            {[{k:'system',l:'系统'},{k:'tushare',l:'Tushare'},{k:'akshare',l:'AkShare'},{k:'eastmoney',l:'东财'}].map(d => (
               <button key={d.k} onClick={() => setDataSource(d.k)} className={`px-2.5 py-1.5 rounded text-[10px] font-medium transition ${dataSource===d.k?'bg-[#513CC8] text-white':'bg-gray-50 text-gray-500 border border-gray-200 hover:border-[#513CC8]/30'}`}>
                 {d.l}
               </button>

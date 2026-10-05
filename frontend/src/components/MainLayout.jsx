@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import useStore from '../store/useStore'
 import Sidebar from './Sidebar'
 import TodayPicksPopup from './TodayPicksPopup'
@@ -77,7 +78,18 @@ const pageTitles = {
 
 export default function MainLayout() {
   const { currentPage, toggleMobileMenu } = useStore()
-  const PageComponent = pageMap[currentPage] || DashboardPage
+  const activePage = pageMap[currentPage] ? currentPage : 'dashboard'
+  const [mountedPages, setMountedPages] = useState(() => [activePage])
+
+  // Lazy keep-alive: a page is mounted only after its first visit, then its
+  // data, form input, selected tabs and scroll position survive navigation.
+  useEffect(() => {
+    setMountedPages(pages => pages.includes(activePage) ? pages : [...pages, activePage])
+  }, [activePage])
+
+  const visiblePages = mountedPages.includes(activePage)
+    ? mountedPages
+    : [...mountedPages, activePage]
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -107,10 +119,22 @@ export default function MainLayout() {
         </div>
 
         {/* Page Content */}
-        <div className="flex-1 overflow-y-auto pb-20 md:pb-0">
-          <ErrorBoundary>
-            <PageComponent />
-          </ErrorBoundary>
+        <div className="flex-1 overflow-hidden relative">
+          {visiblePages.map(pageKey => {
+            const PageComponent = pageMap[pageKey]
+            const isActive = pageKey === activePage
+            return (
+              <div
+                key={pageKey}
+                className={`${isActive ? 'block' : 'hidden'} h-full overflow-y-auto pb-20 md:pb-0`}
+                aria-hidden={!isActive}
+              >
+                <ErrorBoundary>
+                  <PageComponent />
+                </ErrorBoundary>
+              </div>
+            )
+          })}
         </div>
       </div>
       <MobileBottomNav />

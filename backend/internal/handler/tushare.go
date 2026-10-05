@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,12 +20,13 @@ import (
 	"quantmind/pkg/response"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // ==================== Tushare Client ====================
 
 const (
-	tushareAPIURL      = "http://api.tushare.pro"
+	tushareAPIURL       = "http://api.tushare.pro"
 	defaultTushareToken = "9009687b64bb934feeb28a7d1245fb4537047b280ea9cc400c812f3f"
 )
 
@@ -94,6 +96,9 @@ type tushareResponse struct {
 // callTushareAPI sends a POST request to the Tushare API
 func callTushareAPI(apiName string, params map[string]string, fields string) (*tushareResponse, error) {
 	token := getTushareToken()
+	if permissionSilenced(token, apiName) {
+		return nil, permissionSkippedError{api: apiName}
+	}
 
 	reqBody := tushareRequest{
 		APIName: apiName,
@@ -125,10 +130,61 @@ func callTushareAPI(apiName string, params map[string]string, fields string) (*t
 	}
 
 	if result.Code != 0 {
+		if result.Code == 40203 {
+			silencePermission(token, apiName)
+		}
 		return nil, fmt.Errorf("tushare error code %d: %s", result.Code, result.Msg)
 	}
 
 	return &result, nil
+}
+
+// 40203 means the token lacks the API permission, which no retry can fix. Without a
+// memory of it every page view pays a doomed round trip per candidate date. The
+// verdict is stored per token so a newly granted token is tried immediately.
+const permissionSilenceDuration = 6 * time.Hour
+
+var (
+	permissionMu            sync.RWMutex
+	permissionToken         string
+	permissionSilencedUntil = map[string]time.Time{}
+)
+
+func permissionSilenced(token, apiName string) bool {
+	permissionMu.Lock()
+	defer permissionMu.Unlock()
+	if token != permissionToken {
+		permissionToken = token
+		permissionSilencedUntil = map[string]time.Time{}
+		return false
+	}
+	return time.Now().Before(permissionSilencedUntil[apiName])
+}
+
+// permissionSkippedError is returned locally, without a round trip, for an API this
+// token is known to lack. Its text keeps "40203" so callers that stop their date
+// walk-back on a rejected API still do so; isPermissionSkipped lets them also stay
+// quiet, since silencePermission already logged the verdict once.
+type permissionSkippedError struct{ api string }
+
+func (e permissionSkippedError) Error() string {
+	return fmt.Sprintf("tushare api %s skipped: 40203 permission silenced for this token", e.api)
+}
+
+func isPermissionSkipped(err error) bool {
+	var target permissionSkippedError
+	return errors.As(err, &target)
+}
+
+func silencePermission(token, apiName string) {
+	permissionMu.Lock()
+	defer permissionMu.Unlock()
+	if token != permissionToken {
+		permissionToken = token
+		permissionSilencedUntil = map[string]time.Time{}
+	}
+	permissionSilencedUntil[apiName] = time.Now().Add(permissionSilenceDuration)
+	log.Printf("[Tushare] %s 无权限(40203)，%d 小时内不再请求该接口", apiName, int(permissionSilenceDuration.Hours()))
 }
 
 // tushareDataToMap converts tushare response fields/items into a slice of maps
@@ -218,22 +274,6 @@ func tsCodeToCode(tsCode string) string {
 	return tsCode
 }
 
-// getLatestTradeDate returns the most recent trade date string in YYYYMMDD format
-// It looks back up to 10 days from today to find the latest trading day
-func getLatestTradeDate() string {
-	now := time.Now()
-	// Try today first, then go backwards
-	for i := 0; i < 10; i++ {
-		d := now.AddDate(0, 0, -i)
-		weekday := d.Weekday()
-		if weekday == time.Saturday || weekday == time.Sunday {
-			continue
-		}
-		return d.Format("20060102")
-	}
-	return now.Format("20060102")
-}
-
 // ==================== Tushare-based fetchBatchQuotes ====================
 
 // fetchBatchQuotesTushare fetches multiple stock quotes from Tushare daily API
@@ -249,13 +289,14 @@ func fetchBatchQuotesTushare(codes []string) map[string]*model.StockQuote {
 		tsCodes[i] = codeToTsCode(code)
 	}
 
-	tradeDate := getLatestTradeDate()
-
-	// Fetch daily data for the latest trading day
-	// Try the latest date, if no data, try previous days
+	// Fetch daily data for the latest trading day.
+	// Anchor on the session the market actually traded last: counting back from
+	// time.Now() stops short of a 长假 (e.g. 国庆) and returns nothing.
+	tradeDate := ""
+	anchor := sessionAnchor()
 	var dailyRows []map[string]interface{}
-	for attempt := 0; attempt < 5; attempt++ {
-		d := time.Now().AddDate(0, 0, -attempt)
+	for attempt := 0; attempt < 6; attempt++ {
+		d := anchor.AddDate(0, 0, -attempt)
 		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
 			continue
 		}
@@ -314,14 +355,16 @@ func fetchBatchQuotesTushare(codes []string) map[string]*model.StockQuote {
 			Code:      code,
 			Name:      name,
 			Price:     closePrice,
+			Close:     closePrice,
+			TradeDate: tradeDate,
 			Change:    change,
 			ChangePct: pctChg,
 			High:      highPrice,
 			Low:       lowPrice,
 			Open:      openPrice,
 			PreClose:  preClose,
-			Volume:    vol * 100, // convert from 手 to 股
-			Amount:    amount / 10, // convert from 千元 to 万元
+			Volume:    vol,           // 手, same unit as the Eastmoney ulist path
+			Amount:    amount * 1000, // 千元 -> 元
 		}
 	}
 
@@ -385,9 +428,9 @@ func fetchTushareStockNames(tsCodes []string) map[string]string {
 // Name and industry cache
 var (
 	tushareNameCacheMu      sync.RWMutex
-	tushareNameCacheMap      map[string]string
-	tushareIndustryCacheMap  map[string]string
-	tushareNameCacheTime     time.Time
+	tushareNameCacheMap     map[string]string
+	tushareIndustryCacheMap map[string]string
+	tushareNameCacheTime    time.Time
 )
 
 // getTushareStockIndustry looks up a stock's industry from the cache
@@ -524,7 +567,7 @@ func fetchKLineTushare(code string, period string, limit int) gin.H {
 			"close":      tsFloat(row, "close"),
 			"high":       tsFloat(row, "high"),
 			"low":        tsFloat(row, "low"),
-			"volume":     vol * 100,  // convert to 股
+			"volume":     vol * 100,     // convert to 股
 			"amount":     amount * 1000, // convert to 元
 			"change_pct": tsFloat(row, "pct_chg"),
 			"turnover":   0, // will be filled if available
@@ -545,20 +588,20 @@ func fetchKLineTushare(code string, period string, limit int) gin.H {
 // GetSystemSettings returns system settings (admin only)
 func (h *Handler) GetSystemSettings(c *gin.Context) {
 	var configs []model.SystemConfig
-	repository.DB.Find(&configs)
+	if err := repository.DB.Find(&configs).Error; err != nil {
+		response.InternalError(c, "读取系统设置失败: "+err.Error())
+		return
+	}
 
 	settings := make(map[string]string)
 	for _, cfg := range configs {
 		settings[cfg.ConfigKey] = cfg.ConfigValue
 	}
 
-	// Mask sensitive tokens for display
-	if token, ok := settings["tushare_token"]; ok && len(token) > 8 {
-		settings["tushare_token"] = token[:4] + "****" + token[len(token)-4:]
-	}
-	if apiKey, ok := settings["ai_decision_api_key"]; ok && len(apiKey) > 8 {
-		settings["ai_decision_api_key"] = apiKey[:4] + "****" + apiKey[len(apiKey)-4:]
-	}
+	// Mask sensitive tokens for display. The update handler recognises this
+	// form and keeps the original value when the user edits another field.
+	settings["tushare_token"] = maskSecret(settings["tushare_token"])
+	settings["ai_decision_api_key"] = maskSecret(settings["ai_decision_api_key"])
 
 	response.Success(c, settings)
 }
@@ -580,38 +623,98 @@ func (h *Handler) UpdateSystemSettings(c *gin.Context) {
 		"ai_decision_model":    true,
 	}
 
-	for key, value := range req {
+	if len(req) == 0 {
+		response.BadRequest(c, "没有需要保存的设置")
+		return
+	}
+
+	// Use a transaction so a failed write cannot leave only part of a
+	// multi-field AI configuration persisted.
+	tx := repository.DB.Begin()
+	if tx.Error != nil {
+		response.InternalError(c, "打开设置事务失败: "+tx.Error.Error())
+		return
+	}
+	tushareChanged := false
+	updatedKeys := 0
+	for key, rawValue := range req {
 		if !allowedKeys[key] {
 			continue
 		}
+		updatedKeys++
+		value := strings.TrimSpace(rawValue)
 
 		var cfg model.SystemConfig
-		err := repository.DB.Where("config_key = ?", key).First(&cfg).Error
-		if err != nil {
+		err := tx.Where("config_key = ?", key).First(&cfg).Error
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			tx.Rollback()
+			response.InternalError(c, "读取设置失败: "+err.Error())
+			return
+		}
+
+		// GET /settings intentionally returns a masked secret. If that value is
+		// submitted unchanged while the user edits the URL/model, preserve the
+		// raw value already in the database instead of storing the mask itself.
+		if (key == "tushare_token" || key == "ai_decision_api_key") && isMaskedSecret(value) {
+			if err == nil && strings.TrimSpace(cfg.ConfigValue) != "" {
+				continue
+			}
+			tx.Rollback()
+			response.BadRequest(c, "请填写完整的密钥，不能保存脱敏值")
+			return
+		}
+		previousValue := cfg.ConfigValue
+
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			// Create new
 			cfg = model.SystemConfig{
 				ConfigKey:   key,
 				ConfigValue: value,
 				Description: getSettingDescription(key),
 			}
-			repository.DB.Create(&cfg)
+			if createErr := tx.Create(&cfg).Error; createErr != nil {
+				tx.Rollback()
+				response.InternalError(c, "保存设置失败: "+createErr.Error())
+				return
+			}
 		} else {
 			// Update existing
-			repository.DB.Model(&cfg).Update("config_value", value)
+			if updateErr := tx.Model(&cfg).Update("config_value", value).Error; updateErr != nil {
+				tx.Rollback()
+				response.InternalError(c, "保存设置失败: "+updateErr.Error())
+				return
+			}
 		}
+		if key == "tushare_token" && previousValue != value {
+			tushareChanged = true
+		}
+	}
+	if updatedKeys == 0 {
+		tx.Rollback()
+		response.BadRequest(c, "没有可保存的设置项")
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		response.InternalError(c, "提交设置失败: "+err.Error())
+		return
 	}
 
 	// Clear token cache if tushare_token was updated
-	if _, ok := req["tushare_token"]; ok {
+	if tushareChanged {
 		clearTushareTokenCache()
 	}
 
-	userID, _ := c.Get("user_id")
-	repository.DB.Create(&model.AuditLog{
-		UserID: userID.(uint), Module: "settings", Action: "update",
-		Target: "system_settings", Detail: "更新系统设置",
-		IP: c.ClientIP(), Status: "success",
-	})
+	if userID, ok := c.Get("user_id"); ok {
+		if uid, ok := userID.(uint); ok {
+			if err := repository.DB.Create(&model.AuditLog{
+				UserID: uid, Module: "settings", Action: "update",
+				Target: "system_settings", Detail: "更新系统设置",
+				IP: c.ClientIP(), Status: "success",
+			}).Error; err != nil {
+				log.Printf("[Settings] audit log write failed: %v", err)
+			}
+		}
+	}
 
 	response.Success(c, gin.H{"message": "设置已更新"})
 }
@@ -652,8 +755,9 @@ func fetchBatchQuotesWithMarketCapTushare(codes []string) map[string]*quoteWithC
 	// Find the latest trade date with data
 	tradeDate := ""
 	var dailyRows []map[string]interface{}
+	anchor := sessionAnchor()
 	for attempt := 0; attempt < 7; attempt++ {
-		d := time.Now().AddDate(0, 0, -attempt)
+		d := anchor.AddDate(0, 0, -attempt)
 		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
 			continue
 		}
@@ -749,8 +853,9 @@ func fetchSingleStockQuoteTushare(code string) *model.StockQuote {
 	tsCode := codeToTsCode(code)
 
 	// Try to get daily data for the latest trade date
+	anchor := sessionAnchor()
 	for attempt := 0; attempt < 7; attempt++ {
-		d := time.Now().AddDate(0, 0, -attempt)
+		d := anchor.AddDate(0, 0, -attempt)
 		if d.Weekday() == time.Saturday || d.Weekday() == time.Sunday {
 			continue
 		}
@@ -787,8 +892,9 @@ func fetchSingleStockQuoteTushare(code string) *model.StockQuote {
 			Low:       tsFloat(row, "low"),
 			Open:      tsFloat(row, "open"),
 			PreClose:  tsFloat(row, "pre_close"),
-			Volume:    tsFloat(row, "vol") * 100,    // 手 -> 股
-			Amount:    tsFloat(row, "amount") / 10,   // 千元 -> 万元
+			// Match the ulist convention the UI expects: volume in 手, amount in 元.
+			Volume: tsFloat(row, "vol"),
+			Amount: tsFloat(row, "amount") * 1000, // 千元 -> 元
 		}
 	}
 

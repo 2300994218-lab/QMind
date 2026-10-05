@@ -2,9 +2,12 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -96,17 +99,17 @@ func (h *Handler) GetDashboard(c *gin.Context) {
 	repository.DB.Model(&model.StrategySignal{}).Count(&signalCount)
 
 	// Get today's market overview
-	today := time.Now().Format("2006-01-02")
+	today := currentSessionDate()
 	var sentiment model.MarketSentiment
 	repository.DB.Where("trade_date = ?", today).First(&sentiment)
 
 	response.Success(c, gin.H{
 		"stats": gin.H{
-			"agents":        agentCount,
-			"users":         userCount,
-			"conversations": conversationCount,
-			"stock_quotes":  quoteCount,
-			"audit_logs":    auditCount,
+			"agents":           agentCount,
+			"users":            userCount,
+			"conversations":    conversationCount,
+			"stock_quotes":     quoteCount,
+			"audit_logs":       auditCount,
 			"strategy_signals": signalCount,
 		},
 		"market_sentiment": sentiment,
@@ -116,7 +119,7 @@ func (h *Handler) GetDashboard(c *gin.Context) {
 // ==================== Market Sentiment & Data ====================
 
 func (h *Handler) GetMarketSentiment(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	days, _ := strconv.Atoi(c.DefaultQuery("days", "7"))
 
 	var sentiments []model.MarketSentiment
@@ -135,7 +138,7 @@ func (h *Handler) GetSectorHeat(c *gin.Context) {
 		pageSize = 30
 	}
 
-	today := time.Now().Format("2006-01-02")
+	today := currentSessionDate()
 
 	// Try fetching real-time data first
 	allSectors := fetchAllSectorOrConcept("sector")
@@ -178,28 +181,38 @@ func (h *Handler) GetSectorHeat(c *gin.Context) {
 }
 
 func (h *Handler) GetLimitUpBoard(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
-	limitType := c.DefaultQuery("type", "")
-	query := repository.DB.Where("trade_date = ?", date)
-	if limitType != "" {
-		query = query.Where("limit_type = ?", limitType)
+	date := queryDate(c, "date")
+	// Only exchange-feed rows are served: the legacy limit_type keys hold the optional
+	// demo seed, whose prices and 连板数 are invented.
+	types := realBoardTypes
+	if requested := c.DefaultQuery("type", ""); requested != "" {
+		rt := realBoardType(requested)
+		if isRealBoardType(rt) {
+			types = []string{rt}
+		} else if isRealBoardType(requested) {
+			types = []string{requested}
+		} else {
+			response.Success(c, []model.LimitUpBoard{})
+			return
+		}
 	}
 	var boards []model.LimitUpBoard
-	query.Order("board_count desc, fund_amount desc").Find(&boards)
+	repository.DB.Where("trade_date = ? AND limit_type IN ?", date, types).
+		Order("board_count desc, fund_amount desc").Find(&boards)
 	response.Success(c, boards)
 }
 
 func (h *Handler) GetDragonTiger(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	var data []model.DragonTiger
 	repository.DB.Where("trade_date = ?", date).Order("net_amount desc").Find(&data)
 	response.Success(c, data)
 }
 
 func (h *Handler) GetBoardLadder(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	var boards []model.LimitUpBoard
-	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up").
+	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up_rt").
 		Order("board_count desc").Find(&boards)
 
 	// Build ladder structure
@@ -216,17 +229,75 @@ func (h *Handler) GetBoardLadder(c *gin.Context) {
 
 // ==================== Real-time Market Data ====================
 
+// resolveStockQuoteCode accepts a six-digit code (with or without an exchange
+// suffix) as well as a stock name, symbol, Tushare code, or pinyin shortcut.
+// The UI historically stripped non-digits before calling this endpoint, which
+// turned a name such as "国泰海通" into an empty code. Keep the resolution in
+// the backend too so API clients are not dependent on that UI behaviour.
+func resolveStockQuoteCode(input string) (string, error) {
+	raw := strings.TrimSpace(input)
+	if raw == "" {
+		return "", fmt.Errorf("请提供股票代码或股票名称")
+	}
+
+	// Normalize common Tushare forms such as 601211.SH while retaining the
+	// six-digit code expected by all quote adapters.
+	candidate := strings.ToUpper(raw)
+	for _, suffix := range []string{".SH", ".SZ", ".BJ"} {
+		candidate = strings.TrimSuffix(candidate, suffix)
+	}
+	if len(candidate) == 6 {
+		allDigits := true
+		for _, r := range candidate {
+			if r < '0' || r > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			return candidate, nil
+		}
+	}
+
+	// Stock basics are populated by the Tushare sync and are also used by the
+	// broadcast search endpoint. Prefer exact matches, then allow a partial
+	// name/pinyin match for convenient queries.
+	upper := strings.ToUpper(raw)
+	lower := strings.ToLower(raw)
+	var stock TsStockBasic
+	exact := repository.DB.Where(
+		"name = ? OR symbol = ? OR ts_code = ? OR cn_spell = ?",
+		raw, raw, upper, lower,
+	).First(&stock)
+	if exact.Error != nil {
+		partial := repository.DB.Where(
+			"name LIKE ? OR symbol LIKE ? OR ts_code LIKE ? OR cn_spell LIKE ?",
+			"%"+raw+"%", "%"+raw+"%", "%"+upper+"%", "%"+lower+"%",
+		).Order("name asc").First(&stock)
+		if partial.Error != nil {
+			return "", fmt.Errorf("未找到股票：%s，请输入股票代码或已收录的股票名称", raw)
+		}
+	}
+
+	code := tsCodeToCode(stock.TsCode)
+	if len(code) != 6 {
+		return "", fmt.Errorf("股票 %s 的代码格式无效", raw)
+	}
+	return code, nil
+}
+
 func (h *Handler) GetStockQuote(c *gin.Context) {
-	code := c.Query("code")
+	input := c.Query("code")
 	source := c.DefaultQuery("source", "tushare")
-	if code == "" {
-		response.BadRequest(c, "请提供股票代码")
+	code, resolveErr := resolveStockQuoteCode(input)
+	if resolveErr != nil {
+		response.BadRequest(c, resolveErr.Error())
 		return
 	}
 
 	// Try to get from database first (cached)
 	var quote model.StockQuote
-	today := time.Now().Format("2006-01-02")
+	today := currentSessionDate()
 	err := repository.DB.Where("code = ? AND trade_date = ?", code, today).
 		Order("created_at desc").First(&quote).Error
 
@@ -247,17 +318,132 @@ func (h *Handler) GetStockQuote(c *gin.Context) {
 
 	// Fallback to external source
 	quoteData, fetchErr := fetchQuoteFromSource(code, source)
-	if fetchErr != nil {
+	effectiveSource := source
+	// fetchQuoteFromSource already swapped in Eastmoney's reachable ulist endpoint
+	// when stock/get was blocked; keep that recorded instead of the requested name.
+	if quoteData != nil && strings.Contains(quoteData.Source, "ulist") {
+		effectiveSource = quoteData.Source
+	}
+	if fetchErr != nil || quoteData == nil || quoteData.Price <= 0 {
+		// Eastmoney/Sina can be temporarily blocked or return an empty payload
+		// from mainland cloud IPs. The local data service uses Tencent's quote
+		// endpoint and is intentionally the reliable fallback for this route.
+		if fallback, fallbackErr := fetchQuoteFromAkShareService(code); fallbackErr == nil && fallback != nil && fallback.Price > 0 {
+			quoteData = fallback
+			fetchErr = nil
+			effectiveSource = "tencent"
+		}
+	}
+	if fetchErr != nil || quoteData == nil || quoteData.Price <= 0 {
+		if fetchErr == nil {
+			fetchErr = fmt.Errorf("数据源未返回有效行情")
+		}
 		response.InternalError(c, "获取行情数据失败: "+fetchErr.Error())
 		return
 	}
 
 	// Save to database
-	quoteData.Source = source
+	quoteData.Source = effectiveSource
 	quoteData.TradeDate = today
 	repository.DB.Create(&quoteData)
 
 	response.Success(c, quoteData)
+}
+
+// fetchQuoteFromAkShareService reads the Tencent-backed quote exposed by the
+// optional Python data service. It is used as a fallback when a direct quote
+// provider is unavailable, and works both locally and inside Docker.
+func fetchQuoteFromAkShareService(code string) (*model.StockQuote, error) {
+	baseURL := strings.TrimRight(getAkShareServiceURL(), "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("AkShare 数据服务地址未配置")
+	}
+
+	reqURL := fmt.Sprintf("%s/stock_quote?code=%s", baseURL, url.QueryEscape(code))
+	client := &http.Client{Timeout: 12 * time.Second}
+	resp, err := client.Get(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("AkShare 返回 HTTP %d", resp.StatusCode)
+	}
+
+	var envelope struct {
+		Code  int                    `json:"code"`
+		Data  map[string]interface{} `json:"data"`
+		Error string                 `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Code != 0 || envelope.Data == nil {
+		if envelope.Error != "" {
+			return nil, errors.New(envelope.Error)
+		}
+		return nil, fmt.Errorf("AkShare 未返回行情")
+	}
+
+	quote := &model.StockQuote{
+		Code:      jsonString(envelope.Data, "code", code),
+		Name:      jsonString(envelope.Data, "name", code),
+		Price:     jsonNumber(envelope.Data, "price"),
+		PreClose:  jsonNumber(envelope.Data, "pre_close"),
+		Open:      jsonNumber(envelope.Data, "open"),
+		High:      jsonNumber(envelope.Data, "high"),
+		Low:       jsonNumber(envelope.Data, "low"),
+		Volume:    jsonNumber(envelope.Data, "volume"),
+		Amount:    jsonNumber(envelope.Data, "amount"),
+		Turnover:  jsonNumber(envelope.Data, "turnover"),
+		MarketCap: jsonNumber(envelope.Data, "market_cap"),
+		PE:        jsonNumber(envelope.Data, "pe"),
+		PB:        jsonNumber(envelope.Data, "pb"),
+		Source:    "tencent",
+	}
+	if quote.PreClose > 0 {
+		quote.Change = quote.Price - quote.PreClose
+		quote.ChangePct = quote.Change / quote.PreClose * 100
+	}
+	if quote.Price <= 0 {
+		return nil, fmt.Errorf("AkShare 返回空行情")
+	}
+	return quote, nil
+}
+
+func jsonNumber(values map[string]interface{}, key string) float64 {
+	value, ok := values[key]
+	if !ok {
+		return 0
+	}
+	switch number := value.(type) {
+	case float64:
+		return number
+	case float32:
+		return float64(number)
+	case int:
+		return float64(number)
+	case json.Number:
+		parsed, _ := number.Float64()
+		return parsed
+	case string:
+		parsed, _ := strconv.ParseFloat(strings.TrimSpace(number), 64)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func jsonString(values map[string]interface{}, key, fallback string) string {
+	if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
 }
 
 func (h *Handler) GetKLine(c *gin.Context) {
@@ -274,11 +460,36 @@ func (h *Handler) GetKLine(c *gin.Context) {
 	repository.DB.Where("code = ? AND period = ?", code, period).
 		Order("trade_date desc").Limit(limit).Find(&klines)
 
+	if len(klines) == 0 {
+		// The k_line_data table is only filled by collectors whose upstream APIs
+		// are unreachable here, so serve real bars straight from Tencent/Sina.
+		bars, src, err := fetchPeriodKLineFallback(code, period, limit)
+		if err == nil && len(bars) > 0 {
+			for _, b := range bars {
+				num := func(k string) float64 { v, _ := b[k].(float64); return v }
+				klines = append(klines, model.KLineData{
+					Code:      code,
+					Period:    period,
+					TradeDate: fmt.Sprintf("%v", b["date"]),
+					Open:      num("open"),
+					Close:     num("close"),
+					High:      num("high"),
+					Low:       num("low"),
+					Volume:    num("volume"),
+					Amount:    num("amount"),
+				})
+			}
+			log.Printf("[KLine] %s(%s) 库内无历史，改用%s %d 根", code, period, src, len(klines))
+		} else if err != nil {
+			log.Printf("[KLine] %s(%s) 兜底K线失败: %v", code, period, err)
+		}
+	}
+
 	response.Success(c, klines)
 }
 
 func (h *Handler) GetSectorList(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	var sectors []model.SectorHeat
 	repository.DB.Where("trade_date = ?", date).Order("net_flow desc").Find(&sectors)
 	response.Success(c, sectors)
@@ -317,12 +528,80 @@ func fetchQuoteFromSource(code, source string) (*model.StockQuote, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return &model.StockQuote{Code: code, Name: "数据获取中"}, nil
+		log.Printf("[Quote] %s 行情请求失败 code=%s: %v", source, code, err)
+		return hqQuoteWithUlistFallback(code, source, &model.StockQuote{Code: code, Name: "数据获取中"}), nil
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	quote := parseQuoteResponse(code, source, string(body))
+	if quote != nil && quote.Price > 0 {
+		log.Printf("[Quote] code=%s 数据源=%s", code, source)
+		return quote, nil
+	}
+	return hqQuoteWithUlistFallback(code, source, quote), nil
+}
+
+// hqQuoteWithUlistFallback keeps the quote route alive when api/qt/stock/get is
+// unreachable: ulist.np/get runs on the same host but is not blocked. parsed is
+// returned unchanged when even the fallback has nothing to offer.
+func hqQuoteWithUlistFallback(code, source string, parsed *model.StockQuote) *model.StockQuote {
+	fallback, err := hqQuoteFromUlist(code)
+	if err == nil {
+		log.Printf("[Quote] code=%s 数据源=eastmoney-ulist(兜底, 原数据源 %s 无有效行情)", code, source)
+		return fallback
+	}
+	log.Printf("[Quote] code=%s ulist 兜底失败: %v", code, err)
+	if parsed != nil {
+		return parsed
+	}
+	return &model.StockQuote{Code: code, Name: "数据获取中"}
+}
+
+// hqQuoteFromUlist maps a ulist.np/get row onto the same StockQuote shape the
+// direct sources produce (volume 手 / amount 元, as Eastmoney reports them).
+func hqQuoteFromUlist(code string) (*model.StockQuote, error) {
+	rows, err := fetchQuoteViaUlist([]string{code})
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, errNoUlistRows
+	}
+	row := rows[0]
+	price := safeFloat(row, "close")
+	if price <= 0 {
+		return nil, fmt.Errorf("ulist 返回空行情")
+	}
+	name := safeString(row, "name")
+	if name == "" {
+		name = code
+	}
+	pure := safeString(row, "code")
+	if pure == "" {
+		pure = extractPureCode(code)
+	}
+	quote := &model.StockQuote{
+		Code:      pure,
+		Name:      name,
+		Price:     price,
+		Close:     price,
+		High:      safeFloat(row, "high"),
+		Low:       safeFloat(row, "low"),
+		Open:      safeFloat(row, "open"),
+		Volume:    safeFloat(row, "volume"),
+		Amount:    safeFloat(row, "amount"),
+		PreClose:  safeFloat(row, "pre_close"),
+		Change:    safeFloat(row, "change"),
+		ChangePct: safeFloat(row, "change_pct"),
+		Turnover:  safeFloat(row, "turnover_rate"),
+		MarketCap: safeFloat(row, "total_mv"),
+		Source:    "eastmoney-ulist",
+	}
+	if quote.ChangePct == 0 && quote.PreClose > 0 {
+		quote.Change = price - quote.PreClose
+		quote.ChangePct = quote.Change / quote.PreClose * 100
+	}
 	return quote, nil
 }
 
@@ -342,7 +621,9 @@ func parseQuoteResponse(code, source, body string) *model.StockQuote {
 				quote.Price, _ = strconv.ParseFloat(fields[3], 64)
 				quote.High, _ = strconv.ParseFloat(fields[4], 64)
 				quote.Low, _ = strconv.ParseFloat(fields[5], 64)
+				// Sina reports 成交量 in 股; StockQuote stores 手 like the other sources.
 				quote.Volume, _ = strconv.ParseFloat(fields[8], 64)
+				quote.Volume = quote.Volume / 100
 				quote.Amount, _ = strconv.ParseFloat(fields[9], 64)
 				if quote.PreClose > 0 {
 					quote.Change = quote.Price - quote.PreClose
@@ -367,6 +648,39 @@ func parseQuoteResponse(code, source, body string) *model.StockQuote {
 					quote.Change = quote.Price - quote.PreClose
 					quote.ChangePct = (quote.Change / quote.PreClose) * 100
 				}
+			}
+		}
+	case "tencent":
+		// Tencent format: v_sh600519="1~name~code~price~pre_close~open~...
+		// ~time~change~change_pct~high~low~...~amount~turnover~pe~...~pb~..."
+		parts := strings.Split(strings.TrimSpace(body), "~")
+		if len(parts) >= 35 {
+			quote.Name = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+			quote.Price, _ = strconv.ParseFloat(parts[3], 64)
+			quote.PreClose, _ = strconv.ParseFloat(parts[4], 64)
+			quote.Open, _ = strconv.ParseFloat(parts[5], 64)
+			quote.Volume, _ = strconv.ParseFloat(parts[6], 64)
+			quote.Change, _ = strconv.ParseFloat(parts[31], 64)
+			quote.ChangePct, _ = strconv.ParseFloat(parts[32], 64)
+			quote.High, _ = strconv.ParseFloat(parts[33], 64)
+			quote.Low, _ = strconv.ParseFloat(parts[34], 64)
+			if len(parts) > 37 {
+				// Tencent reports amount in 万元; StockQuote stores yuan.
+				amount, _ := strconv.ParseFloat(parts[37], 64)
+				quote.Amount = amount * 10000
+			}
+			if len(parts) > 38 {
+				quote.Turnover, _ = strconv.ParseFloat(parts[38], 64)
+			}
+			if len(parts) > 39 {
+				quote.PE, _ = strconv.ParseFloat(parts[39], 64)
+			}
+			if len(parts) > 44 {
+				marketCap, _ := strconv.ParseFloat(parts[44], 64)
+				quote.MarketCap = marketCap * 100000000
+			}
+			if len(parts) > 46 {
+				quote.PB, _ = strconv.ParseFloat(parts[46], 64)
 			}
 		}
 	default:
@@ -643,8 +957,23 @@ func buildSystemPrompt(agent model.Agent, skills []model.Skill) string {
 
 func (h *Handler) ListAIProviders(c *gin.Context) {
 	var providers []model.AIProvider
-	repository.DB.Find(&providers)
+	if err := repository.DB.Find(&providers).Error; err != nil {
+		response.InternalError(c, "读取AI提供商失败: "+err.Error())
+		return
+	}
+	for i := range providers {
+		providers[i].APIKey = maskSecret(providers[i].APIKey)
+	}
 	response.Success(c, providers)
+}
+
+type aiProviderUpdateRequest struct {
+	APIKey    *string `json:"api_key"`
+	BaseURL   *string `json:"base_url"`
+	Model     *string `json:"model"`
+	IsDefault *bool   `json:"is_default"`
+	IsEnabled *bool   `json:"is_enabled"`
+	Label     *string `json:"label"`
 }
 
 func (h *Handler) UpdateAIProvider(c *gin.Context) {
@@ -655,26 +984,61 @@ func (h *Handler) UpdateAIProvider(c *gin.Context) {
 		return
 	}
 
-	var req model.AIProvider
+	var req aiProviderUpdateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "参数错误")
 		return
 	}
 
-	repository.DB.Model(&provider).Updates(map[string]interface{}{
-		"api_key":    req.APIKey,
-		"base_url":   req.BaseURL,
-		"model":      req.Model,
-		"is_default": req.IsDefault,
-		"is_enabled": req.IsEnabled,
-		"label":      req.Label,
-	})
-
-	// If setting as default, unset others
-	if req.IsDefault {
-		repository.DB.Model(&model.AIProvider{}).Where("id != ?", id).Update("is_default", false)
+	updates := make(map[string]interface{})
+	if req.APIKey != nil {
+		apiKey := strings.TrimSpace(*req.APIKey)
+		// The list endpoint masks keys. Keep the stored key when the mask is
+		// submitted back while another provider field is being edited.
+		if !isMaskedSecret(apiKey) {
+			updates["api_key"] = apiKey
+		} else {
+			updates["api_key"] = provider.APIKey
+		}
+	}
+	if req.BaseURL != nil {
+		updates["base_url"] = strings.TrimSpace(*req.BaseURL)
+	}
+	if req.Model != nil {
+		updates["model"] = strings.TrimSpace(*req.Model)
+	}
+	if req.IsDefault != nil {
+		updates["is_default"] = *req.IsDefault
+	}
+	if req.IsEnabled != nil {
+		updates["is_enabled"] = *req.IsEnabled
+	}
+	if req.Label != nil {
+		updates["label"] = strings.TrimSpace(*req.Label)
+	}
+	if len(updates) == 0 {
+		response.BadRequest(c, "没有需要更新的配置")
+		return
 	}
 
+	if err := repository.DB.Model(&provider).Updates(updates).Error; err != nil {
+		response.InternalError(c, "保存AI提供商失败: "+err.Error())
+		return
+	}
+
+	// If setting as default, unset others
+	if req.IsDefault != nil && *req.IsDefault {
+		if err := repository.DB.Model(&model.AIProvider{}).Where("id != ?", id).Update("is_default", false).Error; err != nil {
+			response.InternalError(c, "更新默认AI提供商失败: "+err.Error())
+			return
+		}
+	}
+
+	if err := repository.DB.First(&provider, id).Error; err != nil {
+		response.InternalError(c, "读取已保存的AI提供商失败: "+err.Error())
+		return
+	}
+	provider.APIKey = maskSecret(provider.APIKey)
 	response.Success(c, provider)
 }
 
@@ -728,7 +1092,11 @@ func (h *Handler) CreateAIProvider(c *gin.Context) {
 		response.BadRequest(c, "参数错误")
 		return
 	}
-	repository.DB.Create(&provider)
+	if err := repository.DB.Create(&provider).Error; err != nil {
+		response.InternalError(c, "创建AI提供商失败: "+err.Error())
+		return
+	}
+	provider.APIKey = maskSecret(provider.APIKey)
 	response.Success(c, provider)
 }
 
@@ -736,7 +1104,7 @@ func (h *Handler) CreateAIProvider(c *gin.Context) {
 
 func (h *Handler) GetStrategySignals(c *gin.Context) {
 	strategy := c.DefaultQuery("strategy", "")
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 
 	query := repository.DB.Where("trade_date = ?", date)

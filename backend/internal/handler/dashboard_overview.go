@@ -24,14 +24,15 @@ import (
 // CRITICAL: Must actively fetch data from multiple sources, never return zeros.
 // Data Source Priority (based on actual API testing 2026-04-30):
 //   - Tushare "daily" API: BEST source! Returns ALL 5460 stocks with pct_chg + amount
-//     * 涨跌分布: from pct_chg (>=9.5% = 涨停, <=-9.5% = 跌停)
-//     * 成交额: sum(amount) in 千元 / 1e9 = 万亿 (千元 * 1000 = 元, 元 / 1e12 = 万亿)
-//     * 涨停/跌停数: count by pct_chg threshold
+//   - 涨跌分布: from pct_chg (>=9.5% = 涨停, <=-9.5% = 跌停)
+//   - 成交额: sum(amount) in 千元 / 1e9 = 万亿 (千元 * 1000 = 元, 元 / 1e12 = 万亿)
+//   - 涨停/跌停数: count by pct_chg threshold
 //   - Tushare "index_daily": SH+SZ amount for total market turnover
 //   - Tushare "moneyflow_ind_ths": 90 industry sectors for concept heat
 //   - Eastmoney APIs: real-time fallback (ZT/DT/ZB Pool, clist)
 //   - limit_list_d: 1次/小时 rate limit, only for detailed limit stock info
 //   - limit_step/ths_daily/limit_list_ths/ths_member: NO PERMISSION with current token
+//
 // Design: All external API calls include aggressive retry. If ALL external sources fail,
 // return the last-known-good data from DB so the UI never shows zeros.
 func (h *Handler) GetDashboardOverview(c *gin.Context) {
@@ -104,9 +105,15 @@ func (h *Handler) GetDashboardOverview(c *gin.Context) {
 	// 4. Limit up/down/broken counts
 	// ALWAYS try AkShare market_stats first for accurate broken/highest data
 	akLimitUp, akLimitDown, akBrokenCount, akHighestBoard, akBrokenRate, akSealRatio := fetchAkShareMarketStats(tradeDate)
-	
+
+	// Priority 0: a finished session already owns its 涨跌停 rows (collector or 交易所涨停价
+	// derivation), and those rows are exactly what the 连板天梯 is built from. Answering from
+	// the live pools instead leaves 封板/炸板 disagreeing with the 天梯 - and costs seconds.
 	var upLimitCount, downLimitCount, brokenCount int64
-	if snapshot != nil && (snapshot.LimitUpCount > 0 || snapshot.LimitDownCount > 0) {
+	if dbUp, dbDown, dbBroken, ok := settledLimitCounts(tradeDate, time.Now()); ok {
+		upLimitCount, downLimitCount, brokenCount = dbUp, dbDown, dbBroken
+		log.Printf("[LimitCounts] 场次 %s 已收盘，用落库涨跌停行: up=%d down=%d broken=%d", tradeDate, dbUp, dbDown, dbBroken)
+	} else if snapshot != nil && (snapshot.LimitUpCount > 0 || snapshot.LimitDownCount > 0) {
 		upLimitCount = int64(snapshot.LimitUpCount)
 		downLimitCount = int64(snapshot.LimitDownCount)
 		// Use AkShare broken count (most reliable)
@@ -249,14 +256,14 @@ func (h *Handler) GetDashboardOverview(c *gin.Context) {
 		len(limitStocks["up_stocks"].([]gin.H)), len(limitStocks["down_stocks"].([]gin.H)), len(limitStocks["broken_stocks"].([]gin.H)))
 
 	response.Success(c, gin.H{
-		"trade_date":   formatTradeDateForDisplay(tradeDate),
-		"indices":      indices,
-		"distribution": distribution,
-		"up_count":     upCount,
-		"down_count":   downCount,
-		"flat_count":   flatCount,
-		"total_amount": totalAmountWanYi,
-		"prev_amount":  prevAmountWanYi,
+		"trade_date":       formatTradeDateForDisplay(tradeDate),
+		"indices":          indices,
+		"distribution":     distribution,
+		"up_count":         upCount,
+		"down_count":       downCount,
+		"flat_count":       flatCount,
+		"total_amount":     totalAmountWanYi,
+		"prev_amount":      prevAmountWanYi,
 		"volume_change_yi": volumeChangeYi, // 较前日变化，单位：亿
 		"sentiment": gin.H{
 			"score":         sentimentScore,
@@ -524,21 +531,29 @@ func fetchDistributionRobust() []gin.H {
 		return distribution
 	}
 
-	// Method 2: Eastmoney index up/down fields (f104/f105/f106) + estimation
+	// Method 2: Sina full-market snapshot — the clist endpoint is TCP-blocked on
+	// this host, but Sina's spot list yields real per-stock pct_chg (no estimate).
+	distribution = fetchDistributionFromSina()
+	if !isDistributionEmpty(distribution) {
+		log.Printf("[Distribution] Got from Sina snapshot")
+		return distribution
+	}
+
+	// Method 3: Eastmoney index up/down fields (f104/f105/f106) + estimation
 	distribution = fetchDistributionFromMarketOverview()
 	if !isDistributionEmpty(distribution) {
 		log.Printf("[Distribution] Got from market overview estimation")
 		return distribution
 	}
 
-	// Method 3: Use Eastmoney alternative clist with different filter
+	// Method 4: Use Eastmoney alternative clist with different filter
 	distribution = fetchDistributionAlt()
 	if !isDistributionEmpty(distribution) {
 		log.Printf("[Distribution] Got from alt clist")
 		return distribution
 	}
 
-	// Method 4: DB fallback - use last known distribution from sentiment
+	// Method 5: DB fallback - use last known distribution from sentiment
 	distribution = fetchDistributionFromDB()
 	if !isDistributionEmpty(distribution) {
 		log.Printf("[Distribution] Got from DB fallback")
@@ -631,15 +646,15 @@ func fetchDistributionFromMarketOverview() []gin.H {
 	}
 
 	return []gin.H{
-		{"label": "涨停", "value": limitUp, "color": "#DC2626"},
-		{"label": "涨停~5%", "value": up5, "color": "#EF4444"},
+		{"label": "涨幅≥9.5%", "value": limitUp, "color": "#DC2626"},
+		{"label": "9.5%~5%", "value": up5, "color": "#EF4444"},
 		{"label": "5%~1%", "value": up1to5, "color": "#F87171"},
 		{"label": "1%~0%", "value": up0to1, "color": "#FCA5A5"},
 		{"label": "平盘", "value": totalFlat, "color": "#D1D5DB"},
 		{"label": "0%~-1%", "value": down0to1, "color": "#86EFAC"},
 		{"label": "-1%~-5%", "value": down1to5, "color": "#4ADE80"},
-		{"label": "-5%~跌停", "value": down5, "color": "#22C55E"},
-		{"label": "跌停", "value": limitDown, "color": "#16A34A"},
+		{"label": "-5%~-9.5%", "value": down5, "color": "#22C55E"},
+		{"label": "跌幅≤-9.5%", "value": limitDown, "color": "#16A34A"},
 	}
 }
 
@@ -676,15 +691,15 @@ func fetchDistributionFromDB() []gin.H {
 	}
 
 	return []gin.H{
-		{"label": "涨停", "value": limitUp, "color": "#DC2626"},
-		{"label": "涨停~5%", "value": up5, "color": "#EF4444"},
+		{"label": "涨幅≥9.5%", "value": limitUp, "color": "#DC2626"},
+		{"label": "9.5%~5%", "value": up5, "color": "#EF4444"},
 		{"label": "5%~1%", "value": up1to5, "color": "#F87171"},
 		{"label": "1%~0%", "value": up0to1, "color": "#FCA5A5"},
 		{"label": "平盘", "value": totalFlat, "color": "#D1D5DB"},
 		{"label": "0%~-1%", "value": down0to1, "color": "#86EFAC"},
 		{"label": "-1%~-5%", "value": down1to5, "color": "#4ADE80"},
-		{"label": "-5%~跌停", "value": down5, "color": "#22C55E"},
-		{"label": "跌停", "value": limitDown, "color": "#16A34A"},
+		{"label": "-5%~-9.5%", "value": down5, "color": "#22C55E"},
+		{"label": "跌幅≤-9.5%", "value": limitDown, "color": "#16A34A"},
 	}
 }
 
@@ -758,21 +773,29 @@ func parseDistributionResponse(data []byte) []gin.H {
 	}
 
 	return []gin.H{
-		{"label": "涨停", "value": limitUp, "color": "#DC2626"},
-		{"label": "涨停~5%", "value": up5, "color": "#EF4444"},
+		{"label": "涨幅≥9.5%", "value": limitUp, "color": "#DC2626"},
+		{"label": "9.5%~5%", "value": up5, "color": "#EF4444"},
 		{"label": "5%~1%", "value": up1to5, "color": "#F87171"},
 		{"label": "1%~0%", "value": up0to1, "color": "#FCA5A5"},
 		{"label": "平盘", "value": flat, "color": "#D1D5DB"},
 		{"label": "0%~-1%", "value": down0to1, "color": "#86EFAC"},
 		{"label": "-1%~-5%", "value": down1to5, "color": "#4ADE80"},
-		{"label": "-5%~跌停", "value": down5, "color": "#22C55E"},
-		{"label": "跌停", "value": limitDown, "color": "#16A34A"},
+		{"label": "-5%~-9.5%", "value": down5, "color": "#22C55E"},
+		{"label": "跌幅≤-9.5%", "value": limitDown, "color": "#16A34A"},
 	}
 }
 
 // ==================== ROBUST FETCH: Limit Counts ====================
 
 func fetchLimitCountsRobust(tradeDate string, refresh bool) (int64, int64, int64) {
+	// Priority 0: a finished session already owns its 涨跌停 rows (collector or 交易所涨停价
+	// derivation). The live pools describe the session being traded now, so answering from
+	// them for a past date leaves 封板/炸板 disagreeing with the 天梯 - and costs seconds.
+	if dbUp, dbDown, dbBroken, ok := settledLimitCounts(tradeDate, time.Now()); ok {
+		log.Printf("[LimitCounts] 场次 %s 已收盘，用落库涨跌停行: up=%d down=%d broken=%d", tradeDate, dbUp, dbDown, dbBroken)
+		return dbUp, dbDown, dbBroken
+	}
+
 	// === Priority 1: Eastmoney Real-time Pool API (fastest, no rate limits) ===
 	upFromEM := fetchLimitCountFromEastmoneyPool("up")
 	downFromEM := fetchLimitCountFromEastmoneyPool("down")
@@ -785,7 +808,20 @@ func fetchLimitCountsRobust(tradeDate string, refresh bool) (int64, int64, int64
 		return int64(upFromEM), int64(downFromEM), int64(brokenFromEM)
 	}
 
-	// === Priority 2: DB (from previous Tushare fetch) ===
+	// === Priority 2: Sina full-market snapshot ===
+	// push2ex pools return rc:102/data:null on non-trading days and can be
+	// unreachable; the Sina spot list still classifies 涨停/跌停 from real prices.
+	if sinaUp, sinaDown, err := fetchLimitUpDownFromSina(); err == nil {
+		sinaUpTotal, _ := sinaUp["total"].(int)
+		sinaDownTotal, _ := sinaDown["total"].(int)
+		if sinaUpTotal > 0 || sinaDownTotal > 0 {
+			log.Printf("[LimitCounts] From Sina snapshot: up=%d down=%d broken=%d", sinaUpTotal, sinaDownTotal, brokenFromEM)
+			persistLimitCountsToDB(tradeDate, sinaUpTotal, sinaDownTotal, brokenFromEM)
+			return int64(sinaUpTotal), int64(sinaDownTotal), int64(brokenFromEM)
+		}
+	}
+
+	// === Priority 3: DB (from previous Tushare fetch) ===
 	var upCount, downCount, brokenCount int64
 	repository.DB.Model(&TsLimitList{}).Where("trade_date = ? AND `limit` = 'U'", tradeDate).Count(&upCount)
 	repository.DB.Model(&TsLimitList{}).Where("trade_date = ? AND `limit` = 'D'", tradeDate).Count(&downCount)
@@ -798,7 +834,7 @@ func fetchLimitCountsRobust(tradeDate string, refresh bool) (int64, int64, int64
 		}
 	}
 
-	// === Priority 3: Tushare API (may be rate-limited) ===
+	// === Priority 4: Tushare API (may be rate-limited) ===
 	ensureLimitListData(tradeDate, refresh)
 	repository.DB.Model(&TsLimitList{}).Where("trade_date = ? AND `limit` = 'U'", tradeDate).Count(&upCount)
 	repository.DB.Model(&TsLimitList{}).Where("trade_date = ? AND `limit` = 'D'", tradeDate).Count(&downCount)
@@ -809,7 +845,7 @@ func fetchLimitCountsRobust(tradeDate string, refresh bool) (int64, int64, int64
 		return upCount, downCount, brokenCount
 	}
 
-	// === Priority 4: DB from nearby dates ===
+	// === Priority 5: DB from nearby dates ===
 	for i := 1; i <= 5; i++ {
 		prevDate := getPreviousTradingDate(tradeDate, i)
 		if prevDate == "" {
@@ -824,7 +860,7 @@ func fetchLimitCountsRobust(tradeDate string, refresh bool) (int64, int64, int64
 		}
 	}
 
-	// === Priority 5: MarketSentiment DB as absolute last resort ===
+	// === Priority 6: MarketSentiment DB as absolute last resort ===
 	var sentiment model.MarketSentiment
 	if err := repository.DB.Where("limit_up_count > 0").Order("trade_date DESC").First(&sentiment).Error; err == nil {
 		log.Printf("[LimitCounts] From MarketSentiment DB: up=%d down=%d broken=%d", sentiment.LimitUpCount, sentiment.LimitDownCount, sentiment.BrokenCount)
@@ -1119,8 +1155,8 @@ func fetchBoardLadderFromEastmoneyPool() []gin.H {
 		ladderMap[boardCount] = append(ladderMap[boardCount], gin.H{
 			"code":           code,
 			"name":           name,
-			"close":          safeFloat(d, "f2") / 100.0,  // Eastmoney returns price in cents
-			"pct_chg":        safeFloat(d, "f3") / 100.0,  // Eastmoney returns pct * 100
+			"close":          safeFloat(d, "f2") / 100.0, // Eastmoney returns price in cents
+			"pct_chg":        safeFloat(d, "f3") / 100.0, // Eastmoney returns pct * 100
 			"amount":         safeFloat(d, "f6"),
 			"turnover_ratio": safeFloat(d, "f8") / 100.0,
 			"tag":            "",
@@ -1175,7 +1211,15 @@ func fetchLimitStocksRobust(tradeDate string, refresh bool) gin.H {
 		return stocks
 	}
 
-	// Priority 4: Try previous dates from DB
+	// Priority 4: Sina snapshot — Eastmoney pools go empty on holidays / when
+	// push2ex is unreachable, but the Sina list still yields real limit movers.
+	stocks = dashLimitStocksFromSina()
+	if hasLimitStocks(stocks) {
+		log.Printf("[LimitStocks] From Sina snapshot")
+		return stocks
+	}
+
+	// Priority 5: Try previous dates from DB
 	for i := 1; i <= 5; i++ {
 		prevDate := getPreviousTradingDate(tradeDate, i)
 		if prevDate == "" {
@@ -1207,14 +1251,65 @@ func hasLimitStocks(stocks gin.H) bool {
 	return len(upStocks) > 0 || len(downStocks) > 0
 }
 
+// dashLimitStocksFromSina wraps the Sina 涨停/跌停 classification into the exact
+// payload + row shape fetchLimitStocksRobust emits (up_stocks/down_stocks/...,
+// rows keyed by pct_chg/turnover_ratio like the DB and Eastmoney sources). Sina
+// carries no 炸板 signal, so broken stays empty; every *_stocks key stays a
+// non-nil []gin.H for the caller's unguarded type assertions.
+func dashLimitStocksFromSina() gin.H {
+	up, down, err := fetchLimitUpDownFromSina()
+	if err != nil {
+		log.Printf("[LimitStocks] Sina snapshot error: %v", err)
+		return gin.H{}
+	}
+	upRows := dashNormalizeLimitRows(up["stocks"])
+	downRows := dashNormalizeLimitRows(down["stocks"])
+	if len(upRows) == 0 && len(downRows) == 0 {
+		return gin.H{}
+	}
+	upTotal, _ := up["total"].(int)
+	downTotal, _ := down["total"].(int)
+	return gin.H{
+		"up_stocks":     upRows,
+		"down_stocks":   downRows,
+		"broken_stocks": []gin.H{},
+		"limit_up":      upTotal,
+		"limit_down":    downTotal,
+		"broken":        0,
+	}
+}
+
+// dashNormalizeLimitRows re-keys the Sina snapshot rows (change_pct/turnover_rate)
+// onto the limit-stock table's field names (pct_chg/turnover_ratio) so the
+// dashboard renders the same columns as the Tushare/Eastmoney sources.
+func dashNormalizeLimitRows(raw interface{}) []gin.H {
+	src, _ := raw.([]gin.H)
+	out := make([]gin.H, 0, len(src))
+	for _, r := range src {
+		out = append(out, gin.H{
+			"code":           r["code"],
+			"name":           r["name"],
+			"close":          r["close"],
+			"pct_chg":        r["change_pct"],
+			"amount":         r["amount"],
+			"turnover_ratio": r["turnover_rate"],
+			"industry":       r["industry"],
+			"limit_times":    0,
+			"status":         "",
+			"tag":            "",
+		})
+	}
+	return out
+}
+
 func fetchLimitStocksFromDB(tradeDate string) gin.H {
 	var upItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'U'", tradeDate).
-		Order("limit_times DESC, pct_chg DESC").Limit(50).Find(&upItems)
+		Order("limit_times DESC, pct_chg DESC").Limit(limitBoardListCap).Find(&upItems)
 
 	var downItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'D'", tradeDate).
-		Order("pct_chg ASC").Limit(50).Find(&downItems)
+		Order("pct_chg ASC").Limit(limitBoardListCap).Find(&downItems)
 
 	var brokenItems []TsLimitList
 	repository.DB.Where("trade_date = ? AND `limit` = 'Z'", tradeDate).
@@ -1405,6 +1500,12 @@ func fetchConceptHeatRobust(tradeDate string) []gin.H {
 		}
 	}
 
+	// Priority 4: Sina concept boards (live, but without fund-flow columns)
+	if sina := fetchSinaBoards("concept"); len(sina) > 0 {
+		log.Printf("[ConceptHeat] Got %d concepts from 新浪板块兜底", len(sina))
+		return sina
+	}
+
 	return []gin.H{}
 }
 
@@ -1470,7 +1571,9 @@ func fetchConceptHeatFromTushare(tradeDate string) []gin.H {
 		"trade_date": tradeDate,
 	}, "ts_code,name,trade_date,close,open,high,low,pct_change,vol,turnover_rate")
 	if err != nil {
-		log.Printf("[ConceptHeat] ths_daily error: %v", err)
+		if !isPermissionSkipped(err) {
+			log.Printf("[ConceptHeat] ths_daily error: %v", err)
+		}
 		return nil
 	}
 
@@ -1659,8 +1762,14 @@ func saveSentimentToDB(tradeDate string, score float64, limitUp, limitDown, brok
 }
 
 func fetchSentimentHistory(days int) []gin.H {
+	// Rows saved before the trading-day clamp can carry 休市 dates; they duplicate
+	// the last real session, so keep only dates up to it.
 	var sentiments []model.MarketSentiment
-	repository.DB.Where("total_amount > 0").Order("trade_date DESC").Limit(days).Find(&sentiments)
+	query := repository.DB.Where("total_amount > 0")
+	if latest, err := getLatestTradingDate(); err == nil {
+		query = query.Where("trade_date <= ?", formatTradeDateForDisplay(latest))
+	}
+	query.Order("trade_date DESC").Limit(days).Find(&sentiments)
 
 	history := []gin.H{}
 	for i := len(sentiments) - 1; i >= 0; i-- {
@@ -1712,15 +1821,15 @@ func isDistributionEmpty(dist []gin.H) bool {
 
 func defaultDistribution() []gin.H {
 	return []gin.H{
-		{"label": "涨停", "value": 0, "color": "#DC2626"},
-		{"label": "涨停~5%", "value": 0, "color": "#EF4444"},
+		{"label": "涨幅≥9.5%", "value": 0, "color": "#DC2626"},
+		{"label": "9.5%~5%", "value": 0, "color": "#EF4444"},
 		{"label": "5%~1%", "value": 0, "color": "#F87171"},
 		{"label": "1%~0%", "value": 0, "color": "#FCA5A5"},
 		{"label": "平盘", "value": 0, "color": "#D1D5DB"},
 		{"label": "0%~-1%", "value": 0, "color": "#86EFAC"},
 		{"label": "-1%~-5%", "value": 0, "color": "#4ADE80"},
-		{"label": "-5%~跌停", "value": 0, "color": "#22C55E"},
-		{"label": "跌停", "value": 0, "color": "#16A34A"},
+		{"label": "-5%~-9.5%", "value": 0, "color": "#22C55E"},
+		{"label": "跌幅≤-9.5%", "value": 0, "color": "#16A34A"},
 	}
 }
 
@@ -1816,15 +1925,15 @@ func fetchTushareMarketDaily(tradeDate string) *tushareMarketSnapshot {
 	snapshot.TotalAmountYi = totalAmountQianYuan / 1e5    // 千元 -> 亿 (千元*1000=元, 元/1e8=亿)
 
 	snapshot.Distribution = []gin.H{
-		{"label": "涨停", "value": limitUp, "color": "#DC2626"},
-		{"label": "涨停~5%", "value": up5, "color": "#EF4444"},
+		{"label": "涨幅≥9.5%", "value": limitUp, "color": "#DC2626"},
+		{"label": "9.5%~5%", "value": up5, "color": "#EF4444"},
 		{"label": "5%~1%", "value": up1to5, "color": "#F87171"},
 		{"label": "1%~0%", "value": up0to1, "color": "#FCA5A5"},
 		{"label": "平盘", "value": flat, "color": "#D1D5DB"},
 		{"label": "0%~-1%", "value": down0to1, "color": "#86EFAC"},
 		{"label": "-1%~-5%", "value": down1to5, "color": "#4ADE80"},
-		{"label": "-5%~跌停", "value": down5, "color": "#22C55E"},
-		{"label": "跌停", "value": limitDown, "color": "#16A34A"},
+		{"label": "-5%~-9.5%", "value": down5, "color": "#22C55E"},
+		{"label": "跌幅≤-9.5%", "value": limitDown, "color": "#16A34A"},
 	}
 
 	// Build limit up/down stock lists
@@ -1895,7 +2004,9 @@ func fetchTushareIndustryHeat(tradeDate string) []gin.H {
 		"trade_date": tradeDate,
 	}, "ts_code,trade_date,name,lead_stock,close_price,pct_change,company_num,net_buy_amount,net_sell_amount,net_amount")
 	if err != nil {
-		log.Printf("[TushareIndustryHeat] Error: %v", err)
+		if !isPermissionSkipped(err) {
+			log.Printf("[TushareIndustryHeat] Error: %v", err)
+		}
 		return nil
 	}
 
@@ -1915,11 +2026,11 @@ func fetchTushareIndustryHeat(tradeDate string) []gin.H {
 		}
 
 		concepts = append(concepts, gin.H{
-			"code":       tsString(row, "ts_code"),
-			"name":       name,
-			"change_pct": tsFloat(row, "pct_change"),
-			"lead_stock": tsString(row, "lead_stock"),
-			"net_amount": tsFloat(row, "net_amount"),
+			"code":        tsString(row, "ts_code"),
+			"name":        name,
+			"change_pct":  tsFloat(row, "pct_change"),
+			"lead_stock":  tsString(row, "lead_stock"),
+			"net_amount":  tsFloat(row, "net_amount"),
 			"company_num": int(tsFloat(row, "company_num")),
 		})
 	}
@@ -2251,6 +2362,11 @@ func fetchAkShareMarketOverview(tradeDate string) map[string]interface{} {
 	data, err := fetchAkShareJSON(fmt.Sprintf("/market_overview?trade_date=%s", tradeDate))
 	if err != nil {
 		log.Printf("[AkShare] market_overview error: %v", err)
+		// AkShare's stock_zh_a_spot_em is not reachable on this host, so prefer
+		// the real Sina per-stock counts before falling back to the estimate.
+		if ov := dashMarketOverviewFromSina(); ov != nil {
+			return ov
+		}
 		// Fallback: estimate from limit data
 		return estimateUpDownFromLimits(tradeDate)
 	}
@@ -2268,9 +2384,44 @@ func fetchAkShareMarketOverview(tradeDate string) map[string]interface{} {
 		}
 	}
 
-	// If market_overview returned zeros (holiday/market closed), estimate from limit data
-	log.Printf("[AkShare] market_overview returned zeros, estimating from limit data")
+	// If market_overview returned zeros (holiday/market closed), prefer the real
+	// Sina counts before estimating from limit data.
+	log.Printf("[AkShare] market_overview returned zeros, trying Sina then estimate")
+	if ov := dashMarketOverviewFromSina(); ov != nil {
+		return ov
+	}
 	return estimateUpDownFromLimits(tradeDate)
+}
+
+// dashMarketOverviewFromSina derives real 涨/跌/平 counts from the cached Sina
+// spot snapshot. It reuses sinaMarketSnapshot's TTL cache, so the ~100s full-market
+// fetch still happens at most once per request. Returns nil when unavailable.
+func dashMarketOverviewFromSina() map[string]interface{} {
+	stocks, err := sinaMarketSnapshot(3 * time.Minute)
+	if err != nil {
+		log.Printf("[UpDown] Sina snapshot error: %v", err)
+		return nil
+	}
+	up, down, flat := 0, 0, 0
+	for _, s := range stocks {
+		switch {
+		case s.PctChg > 0:
+			up++
+		case s.PctChg < 0:
+			down++
+		default:
+			flat++
+		}
+	}
+	if up == 0 && down == 0 {
+		return nil
+	}
+	log.Printf("[UpDown] From Sina snapshot: up=%d, down=%d, flat=%d", up, down, flat)
+	return map[string]interface{}{
+		"up_count":   up,
+		"down_count": down,
+		"flat_count": flat,
+	}
 }
 
 // estimateUpDownFromLimits estimates market up/down counts from limit-up/down data

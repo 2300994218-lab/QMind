@@ -21,7 +21,7 @@ import (
 
 // FetchMarketData - manually trigger market data fetch from Eastmoney
 func (h *Handler) FetchMarketData(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 	go fetchAllMarketData(date)
 	response.Success(c, gin.H{"message": "正在获取市场数据", "date": date})
 }
@@ -31,6 +31,9 @@ func fetchAllMarketData(date string) {
 	log.Printf("[MarketFetch] Starting data fetch for %s", date)
 	fetchSectorHeatFromEastmoney(date)
 	fetchLimitUpFromEastmoney(date)
+	// Runs before sentiment so the 最高X板 it stores sees the derived 连板数: the 涨停池
+	// only publishes f136 while its session is live.
+	ensureDerivedLimitLists(strings.ReplaceAll(date, "-", ""))
 	fetchDragonTigerFromEastmoney(date)
 	buildMarketSentiment(date)
 	log.Printf("[MarketFetch] Completed data fetch for %s", date)
@@ -39,15 +42,16 @@ func fetchAllMarketData(date string) {
 // fetchSectorHeatFromEastmoney fetches sector data from East Money API
 func fetchSectorHeatFromEastmoney(date string) {
 	url := "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=30&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:3&fields=f2,f3,f12,f14,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87,f204,f205"
-	
+
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 	req.Header.Set("Referer", "https://data.eastmoney.com")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[MarketFetch] Sector heat fetch error: %v", err)
+		fetchSectorHeatFromSina(date)
 		return
 	}
 	defer resp.Body.Close()
@@ -56,15 +60,18 @@ func fetchSectorHeatFromEastmoney(date string) {
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
 		log.Printf("[MarketFetch] Sector heat parse error: %v", err)
+		fetchSectorHeatFromSina(date)
 		return
 	}
 
 	data, ok := result["data"].(map[string]interface{})
 	if !ok {
+		fetchSectorHeatFromSina(date)
 		return
 	}
 	diffArr, ok := data["diff"].([]interface{})
-	if !ok {
+	if !ok || len(diffArr) == 0 {
+		fetchSectorHeatFromSina(date)
 		return
 	}
 
@@ -92,16 +99,26 @@ func fetchSectorHeatFromEastmoney(date string) {
 	log.Printf("[MarketFetch] Saved %d sector records", len(diffArr))
 }
 
+// fetchSectorHeatFromSina writes Sina industry + concept boards into the same
+// table, used whenever Eastmoney's blocked clist endpoint yields nothing.
+func fetchSectorHeatFromSina(date string) {
+	sectors := fetchSinaBoards("sector")
+	persistSectorHeatData(sectors, "sector", date)
+	concepts := fetchSinaBoards("concept")
+	persistSectorHeatData(concepts, "concept", date)
+	log.Printf("[MarketFetch] 新浪板块兜底: 行业 %d 个, 概念 %d 个", len(sectors), len(concepts))
+}
+
 // fetchLimitUpFromEastmoney fetches limit-up board data
 func fetchLimitUpFromEastmoney(date string) {
 	// Eastmoney limit-up API
 	url := "https://push2ex.eastmoney.com/getTopicZTPool?ut=7eea3edcaed734bea9cb3f&dpt=wz.ztzt&Ession=" + date + "&fields=f1,f2,f3,f4,f6,f8,f12,f14,f15,f17,f22,f136,f224,f225"
-	
+
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://quote.eastmoney.com")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[MarketFetch] Limit-up fetch error: %v", err)
@@ -124,20 +141,22 @@ func fetchLimitUpFromEastmoney(date string) {
 		return
 	}
 
-	// Delete old data for this date
-	repository.DB.Where("trade_date = ?", date).Delete(&model.LimitUpBoard{})
+	// Replace only this feed's own rows, leaving other keys for the date untouched
+	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up_rt").Delete(&model.LimitUpBoard{})
 
 	for _, item := range pool {
 		d, ok := item.(map[string]interface{})
 		if !ok {
 			continue
 		}
+		// The '*_rt' key is the one the dashboard reads: it marks rows that came from an
+		// exchange feed rather than from the optional demo seed.
 		board := model.LimitUpBoard{
 			Code:       safeString(d, "f12"),
 			Name:       safeString(d, "f14"),
 			Price:      safeFloat(d, "f2") / 1000,
 			ChangePct:  safeFloat(d, "f3") / 1000,
-			LimitType:  "limit_up",
+			LimitType:  "limit_up_rt",
 			BoardCount: safeInt(d, "f136"),
 			FundAmount: safeFloat(d, "f6") / 100000000,
 			Concept:    safeString(d, "f225"),
@@ -155,12 +174,12 @@ func fetchLimitUpFromEastmoney(date string) {
 func fetchDragonTigerFromEastmoney(date string) {
 	dateParam := strings.ReplaceAll(date, "-", "")
 	url := fmt.Sprintf("https://datacenter-web.eastmoney.com/api/data/v1/get?sortColumns=SECURITY_CODE&sortTypes=1&pageSize=20&pageNumber=1&reportName=RPT_DAILYBILLBOARD_DETAILSNEW&columns=ALL&filter=(TRADE_DATE='%s')", date)
-	
+
 	client := &http.Client{Timeout: 15 * time.Second}
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 	req.Header.Set("Referer", "https://data.eastmoney.com/stock/tradedetail.html")
-	
+
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[MarketFetch] Dragon-tiger fetch error: %v (date: %s)", err, dateParam)
@@ -207,15 +226,17 @@ func fetchDragonTigerFromEastmoney(date string) {
 
 // buildMarketSentiment builds sentiment from existing data
 func buildMarketSentiment(date string) {
+	// Only the '*_rt' keys hold exchange-feed rows; the legacy keys belong to the
+	// optional demo seed and would inflate the score with invented boards.
 	var limitUpCount int64
-	repository.DB.Model(&model.LimitUpBoard{}).Where("trade_date = ? AND limit_type = ?", date, "limit_up").Count(&limitUpCount)
+	repository.DB.Model(&model.LimitUpBoard{}).Where("trade_date = ? AND limit_type = ?", date, "limit_up_rt").Count(&limitUpCount)
 
 	var brokenCount int64
-	repository.DB.Model(&model.LimitUpBoard{}).Where("trade_date = ? AND limit_type = ?", date, "broken").Count(&brokenCount)
+	repository.DB.Model(&model.LimitUpBoard{}).Where("trade_date = ? AND limit_type = ?", date, "broken_rt").Count(&brokenCount)
 
 	// Get highest board
 	var maxBoard model.LimitUpBoard
-	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up").Order("board_count desc").First(&maxBoard)
+	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up_rt").Order("board_count desc").First(&maxBoard)
 
 	// Get total sector flow
 	var totalAmount float64
@@ -317,6 +338,9 @@ func safeInt(d map[string]interface{}, key string) int {
 }
 
 // SeedDemoMarketData seeds realistic market data for the past 7 days
+//
+// It writes the legacy limit_up_boards keys (limit_up/limit_down/broken); the dashboard
+// and picker only read the '*_rt' keys, so demo rows never surface as live data.
 func SeedDemoMarketData() {
 	log.Println("[Seed] Starting demo market data seeding for past 7 days...")
 
@@ -605,7 +629,7 @@ func min(a, b int) int {
 
 // GetDashboardEnhanced returns dashboard data with 7-day history
 func (h *Handler) GetDashboardEnhanced(c *gin.Context) {
-	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
+	date := queryDate(c, "date")
 
 	// Stats counts
 	var agentCount, userCount, conversationCount, quoteCount, auditCount, signalCount int64
@@ -632,13 +656,14 @@ func (h *Handler) GetDashboardEnhanced(c *gin.Context) {
 	var sectors []model.SectorHeat
 	repository.DB.Where("trade_date = ?", date).Order("change_pct desc").Find(&sectors)
 
-	// Get limit-ups
+	// Get limit-ups. The '*_rt' keys hold exchange-feed rows; the legacy keys hold the
+	// optional demo seed, whose 连板数 is invented.
 	var limitUps []model.LimitUpBoard
-	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up").Order("board_count desc, fund_amount desc").Find(&limitUps)
+	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "limit_up_rt").Order("board_count desc, fund_amount desc").Find(&limitUps)
 
 	// Get broken boards
 	var brokens []model.LimitUpBoard
-	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "broken").Order("open_count desc").Find(&brokens)
+	repository.DB.Where("trade_date = ? AND limit_type = ?", date, "broken_rt").Order("open_count desc").Find(&brokens)
 
 	// Get dragon tigers
 	var dragons []model.DragonTiger

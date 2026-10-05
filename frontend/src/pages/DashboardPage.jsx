@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { getDashboard, getConceptHeat, getSectorFundFlow, getSectorHeat, getTsLimitStats, getTsLimitStep, getTsMoneyflow, getTsRealTimeStats, getDashboardOverview } from '../services/api'
 import { BarChart3, TrendingUp, TrendingDown, Activity, Flame, Crown, AlertTriangle, DollarSign, Users, Zap, ArrowUp, ArrowDown, RefreshCw, Lightbulb, Eye, ChevronLeft, ChevronRight, Maximize, Minimize, Calendar } from 'lucide-react'
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
+import { localDateStr } from '../utils/date'
 
 // ==================== Modern Calendar Picker for Dashboard ====================
 function DashboardCalendar({ date, onChange }) {
@@ -143,7 +144,7 @@ function DashboardCalendar({ date, onChange }) {
                 if (d.getDay() !== 0 && d.getDay() !== 6) count++
                 if (count <= offset) d = new Date(d.getTime() - 86400000)
               }
-              const dateStr = d.toISOString().slice(0, 10)
+              const dateStr = localDateStr(d)
               const label = offset === 0 ? '今天' : offset === 1 ? '昨天' : `前${offset}天`
               return (
                 <button key={offset} onClick={() => { onChange(dateStr); setOpen(false) }}
@@ -163,7 +164,7 @@ function DashboardCalendar({ date, onChange }) {
 }
 
 export default function DashboardPage() {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10))
+  const [date, setDate] = useState(localDateStr())
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [conceptData, setConceptData] = useState([])
@@ -236,24 +237,25 @@ export default function DashboardPage() {
     return null
   }
 
-  const loadData = async () => {
+  const loadData = async (forceRefresh = false) => {
     setLoading(true)
     setMoneyflowPage(1)
+    const refreshParams = forceRefresh ? { refresh: 'true' } : {}
     try {
       const [dashRes, conceptRes, sectorFlowRes, conceptFlowRes, sectorHeatRes,
              overviewRes, tsStatsRes, tsLimitRes, tsStepRes, tsMoneyflowRes] = await Promise.all([
-        retryFetch(() => getDashboard({ date })),
-        retryFetch(() => getConceptHeat({ page: 1, page_size: 100 })),
-        retryFetch(() => getSectorFundFlow({ category: 'sector', page: 1, page_size: 100 })),
-        retryFetch(() => getSectorFundFlow({ category: 'concept', page: 1, page_size: 100 })),
-        retryFetch(() => getSectorHeat({ page: 1, page_size: 100 })),
+        retryFetch(() => getDashboard({ date, ...refreshParams })),
+        retryFetch(() => getConceptHeat({ page: 1, page_size: 100, ...refreshParams })),
+        retryFetch(() => getSectorFundFlow({ category: 'sector', page: 1, page_size: 100, ...refreshParams })),
+        retryFetch(() => getSectorFundFlow({ category: 'concept', page: 1, page_size: 100, ...refreshParams })),
+        retryFetch(() => getSectorHeat({ page: 1, page_size: 100, ...refreshParams })),
         // New dashboard overview API
-        retryFetch(() => getDashboardOverview({ trade_date: tsDate })),
+        retryFetch(() => getDashboardOverview({ trade_date: tsDate, ...refreshParams })),
         // Tushare-backed APIs
-        retryFetch(() => getTsRealTimeStats({ trade_date: tsDate })),
-        retryFetch(() => getTsLimitStats({ trade_date: tsDate })),
-        retryFetch(() => getTsLimitStep({ trade_date: tsDate })),
-        retryFetch(() => getTsMoneyflow({ trade_date: tsDate, category: 'stock', page: 1, page_size: MONEYFLOW_PAGE_SIZE })),
+        retryFetch(() => getTsRealTimeStats({ trade_date: tsDate, ...refreshParams })),
+        retryFetch(() => getTsLimitStats({ trade_date: tsDate, ...refreshParams })),
+        retryFetch(() => getTsLimitStep({ trade_date: tsDate, ...refreshParams })),
+        retryFetch(() => getTsMoneyflow({ trade_date: tsDate, category: 'stock', page: 1, page_size: MONEYFLOW_PAGE_SIZE, ...refreshParams })),
       ])
 
       if (dashRes?.code === 0) setData(dashRes.data || null)
@@ -524,7 +526,7 @@ export default function DashboardPage() {
         <div className="flex items-center gap-2">
           {/* Modern Calendar Picker */}
           <DashboardCalendar date={date} onChange={setDate} />
-          <button onClick={loadData} disabled={loading}
+          <button onClick={() => loadData(true)} disabled={loading}
             className="p-2 rounded-lg text-gray-400 hover:text-[#513CC8] hover:bg-[#F0EDFA] transition ml-1">
             <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
           </button>
@@ -754,7 +756,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-2 mb-3 flex-wrap text-[10px]">
             <span className="px-2 py-0.5 rounded bg-red-50 text-red-600 font-bold border border-red-100">封板 {sentimentData.limit_up || tsSentiment.limit_up_count || 0}</span>
             <span className="px-2 py-0.5 rounded bg-yellow-50 text-yellow-600 font-bold border border-yellow-100">炸板 {sentimentData.broken || tsSentiment.broken_count || 0}</span>
-            <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-600 font-bold border border-purple-100">最高 {sentimentData.highest_board || boardLadder.max_board || 0}板</span>
+            <span className="px-2 py-0.5 rounded bg-purple-50 text-purple-600 font-bold border border-purple-100">{(sentimentData.highest_board || boardLadder.max_board) ? `最高 ${sentimentData.highest_board || boardLadder.max_board}板` : '最高 --板'}</span>
             {ladderList.length > 0 && ladderList.slice(0, 3).map((lv, idx) => (
               <span key={idx} className="px-2 py-0.5 rounded bg-orange-50 text-orange-600 border border-orange-100">
                 {lv.level}板 {lv.count}只
@@ -860,7 +862,7 @@ export default function DashboardPage() {
                   </tbody>
                 </table>
               ) : (
-                <div className="text-center py-4 text-gray-400 text-xs">暂无连板天梯数据</div>
+                <div className="text-center py-4 text-gray-400 text-xs">暂无连板天梯数据<br /><span className="text-[10px]">连板数盘中取自东方财富涨停池，休市场次按交易所涨停价由日K推导，首次加载后自动补齐</span></div>
               )
             )}
           </div>

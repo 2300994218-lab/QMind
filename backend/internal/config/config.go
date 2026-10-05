@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 type Config struct {
 	ServerPort    string
@@ -18,11 +21,12 @@ type Config struct {
 	JWTSecret     string
 	AdminUser     string
 	AdminPassword string
+	PageCacheDir  string
 }
 
 func Load() *Config {
 	return &Config{
-		ServerPort:    getEnv("SERVER_PORT", "8080"),
+		ServerPort:    getEnv("SERVER_PORT", "8004"),
 		GinMode:       getEnv("GIN_MODE", "debug"),
 		DBDriver:      getEnv("DB_DRIVER", "sqlite"),
 		DBHost:        getEnv("DB_HOST", "mysql"),
@@ -37,7 +41,20 @@ func Load() *Config {
 		JWTSecret:     getEnv("JWT_SECRET", "quantmind-secret-key-2026"),
 		AdminUser:     getEnv("ADMIN_USER", "admin"),
 		AdminPassword: getEnv("ADMIN_PASSWORD", "Admin@2026!"),
+		PageCacheDir:  getEnv("PAGE_CACHE_DIR", defaultPageCacheDir()),
 	}
+}
+
+// defaultPageCacheDir works for both common local launch locations: the
+// repository root and the backend directory. Docker sets PAGE_CACHE_DIR
+// explicitly to /app/temp/pages.
+func defaultPageCacheDir() string {
+	for _, candidate := range []string{"temp", "../temp"} {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return filepath.Join(candidate, "pages")
+		}
+	}
+	return filepath.Join("temp", "pages")
 }
 
 func getEnv(key, defaultVal string) string {

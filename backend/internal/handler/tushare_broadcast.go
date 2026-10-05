@@ -69,49 +69,49 @@ type TsStkPremarket struct {
 
 // TsFinaIncome stores 利润表摘要
 type TsFinaIncome struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	TsCode       string    `gorm:"size:20;index:idx_tsfi_code" json:"ts_code"`
-	AnnDate      string    `gorm:"size:10;index:idx_tsfi_ann" json:"ann_date"`
-	EndDate      string    `gorm:"size:10" json:"end_date"`
-	ReportType   string    `gorm:"size:5" json:"report_type"`
-	BasicEps     float64   `json:"basic_eps"`
-	TotalRevenue float64   `json:"total_revenue"`
-	Revenue      float64   `json:"revenue"`
-	OperateProfit float64  `json:"operate_profit"`
-	TotalProfit  float64   `json:"total_profit"`
-	NIncome      float64   `json:"n_income"`
-	NIncomeAttrP float64   `json:"n_income_attr_p"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	TsCode        string    `gorm:"size:20;index:idx_tsfi_code" json:"ts_code"`
+	AnnDate       string    `gorm:"size:10;index:idx_tsfi_ann" json:"ann_date"`
+	EndDate       string    `gorm:"size:10" json:"end_date"`
+	ReportType    string    `gorm:"size:5" json:"report_type"`
+	BasicEps      float64   `json:"basic_eps"`
+	TotalRevenue  float64   `json:"total_revenue"`
+	Revenue       float64   `json:"revenue"`
+	OperateProfit float64   `json:"operate_profit"`
+	TotalProfit   float64   `json:"total_profit"`
+	NIncome       float64   `json:"n_income"`
+	NIncomeAttrP  float64   `json:"n_income_attr_p"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TsFinaBalance stores 资产负债表摘要
 type TsFinaBalance struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	TsCode        string    `gorm:"size:20;index:idx_tsfb_code" json:"ts_code"`
-	AnnDate       string    `gorm:"size:10;index:idx_tsfb_ann" json:"ann_date"`
-	EndDate       string    `gorm:"size:10" json:"end_date"`
-	ReportType    string    `gorm:"size:5" json:"report_type"`
-	TotalAssets   float64   `json:"total_assets"`
-	TotalLiab     float64   `json:"total_liab"`
-	TotalHldrEqy  float64   `json:"total_hldr_eqy"`
-	MoneyCap      float64   `json:"money_cap"`
-	AccountsRecv  float64   `json:"accounts_receiv"`
-	Inventories   float64   `json:"inventories"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	TsCode       string    `gorm:"size:20;index:idx_tsfb_code" json:"ts_code"`
+	AnnDate      string    `gorm:"size:10;index:idx_tsfb_ann" json:"ann_date"`
+	EndDate      string    `gorm:"size:10" json:"end_date"`
+	ReportType   string    `gorm:"size:5" json:"report_type"`
+	TotalAssets  float64   `json:"total_assets"`
+	TotalLiab    float64   `json:"total_liab"`
+	TotalHldrEqy float64   `json:"total_hldr_eqy"`
+	MoneyCap     float64   `json:"money_cap"`
+	AccountsRecv float64   `json:"accounts_receiv"`
+	Inventories  float64   `json:"inventories"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // TsFinaCashflow stores 现金流量表摘要
 type TsFinaCashflow struct {
-	ID              uint      `gorm:"primaryKey" json:"id"`
-	TsCode          string    `gorm:"size:20;index:idx_tsfc_code" json:"ts_code"`
-	AnnDate         string    `gorm:"size:10;index:idx_tsfc_ann" json:"ann_date"`
-	EndDate         string    `gorm:"size:10" json:"end_date"`
-	ReportType      string    `gorm:"size:5" json:"report_type"`
-	NCashflowAct    float64   `json:"n_cashflow_act"`
-	NCashflowInvAct float64   `json:"n_cashflow_inv_act"`
-	NCashFlowsFncAct float64  `json:"n_cash_flows_fnc_act"`
-	FreeCashflow    float64   `json:"free_cashflow"`
-	CreatedAt       time.Time `json:"created_at"`
+	ID               uint      `gorm:"primaryKey" json:"id"`
+	TsCode           string    `gorm:"size:20;index:idx_tsfc_code" json:"ts_code"`
+	AnnDate          string    `gorm:"size:10;index:idx_tsfc_ann" json:"ann_date"`
+	EndDate          string    `gorm:"size:10" json:"end_date"`
+	ReportType       string    `gorm:"size:5" json:"report_type"`
+	NCashflowAct     float64   `json:"n_cashflow_act"`
+	NCashflowInvAct  float64   `json:"n_cashflow_inv_act"`
+	NCashFlowsFncAct float64   `json:"n_cash_flows_fnc_act"`
+	FreeCashflow     float64   `json:"free_cashflow"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 // TsFinaForecast stores 业绩预告
@@ -131,20 +131,20 @@ type TsFinaForecast struct {
 
 // TsFinaExpress stores 业绩快报
 type TsFinaExpress struct {
-	ID          uint      `gorm:"primaryKey" json:"id"`
-	TsCode      string    `gorm:"size:20;index:idx_tsfe_code" json:"ts_code"`
-	AnnDate     string    `gorm:"size:10;index:idx_tsfe_ann" json:"ann_date"`
-	EndDate     string    `gorm:"size:10" json:"end_date"`
-	Revenue     float64   `json:"revenue"`
-	OperateProfit float64 `json:"operate_profit"`
-	NIncome     float64   `json:"n_income"`
-	TotalAssets float64   `json:"total_assets"`
-	DilutedEps  float64   `json:"diluted_eps"`
-	DilutedRoe  float64   `json:"diluted_roe"`
-	YoySales    float64   `json:"yoy_sales"`
-	YoyDeduNp   float64   `json:"yoy_dedu_np"`
-	PerfSummary string    `gorm:"size:2000" json:"perf_summary"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	TsCode        string    `gorm:"size:20;index:idx_tsfe_code" json:"ts_code"`
+	AnnDate       string    `gorm:"size:10;index:idx_tsfe_ann" json:"ann_date"`
+	EndDate       string    `gorm:"size:10" json:"end_date"`
+	Revenue       float64   `json:"revenue"`
+	OperateProfit float64   `json:"operate_profit"`
+	NIncome       float64   `json:"n_income"`
+	TotalAssets   float64   `json:"total_assets"`
+	DilutedEps    float64   `json:"diluted_eps"`
+	DilutedRoe    float64   `json:"diluted_roe"`
+	YoySales      float64   `json:"yoy_sales"`
+	YoyDeduNp     float64   `json:"yoy_dedu_np"`
+	PerfSummary   string    `gorm:"size:2000" json:"perf_summary"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TsFinaAudit stores 财务审计意见
@@ -161,33 +161,33 @@ type TsFinaAudit struct {
 
 // TsFinaMainbz stores 主营业务构成
 type TsFinaMainbz struct {
-	ID       uint      `gorm:"primaryKey" json:"id"`
-	TsCode   string    `gorm:"size:20;index:idx_tsfm_code" json:"ts_code"`
-	EndDate  string    `gorm:"size:10;index:idx_tsfm_end" json:"end_date"`
-	BzItem   string    `gorm:"size:200" json:"bz_item"`
-	BzSales  float64   `json:"bz_sales"`
-	BzProfit float64   `json:"bz_profit"`
-	BzCost   float64   `json:"bz_cost"`
+	ID        uint      `gorm:"primaryKey" json:"id"`
+	TsCode    string    `gorm:"size:20;index:idx_tsfm_code" json:"ts_code"`
+	EndDate   string    `gorm:"size:10;index:idx_tsfm_end" json:"end_date"`
+	BzItem    string    `gorm:"size:200" json:"bz_item"`
+	BzSales   float64   `json:"bz_sales"`
+	BzProfit  float64   `json:"bz_profit"`
+	BzCost    float64   `json:"bz_cost"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 // TsFinaIndicator stores 财务指标摘要
 type TsFinaIndicator struct {
-	ID             uint      `gorm:"primaryKey" json:"id"`
-	TsCode         string    `gorm:"size:20;index:idx_tsfind_code" json:"ts_code"`
-	AnnDate        string    `gorm:"size:10;index:idx_tsfind_ann" json:"ann_date"`
-	EndDate        string    `gorm:"size:10" json:"end_date"`
-	Eps            float64   `json:"eps"`
-	Roe            float64   `json:"roe"`
-	RoeWaa         float64   `json:"roe_waa"`
-	GrossProfitMargin float64 `json:"grossprofit_margin"`
-	NetProfitMargin float64  `json:"netprofit_margin"`
-	DebtToAssets   float64   `json:"debt_to_assets"`
-	CurrentRatio   float64   `json:"current_ratio"`
-	NetprofitYoy   float64   `json:"netprofit_yoy"`
-	OrYoy          float64   `json:"or_yoy"`
-	Bps            float64   `json:"bps"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID                uint      `gorm:"primaryKey" json:"id"`
+	TsCode            string    `gorm:"size:20;index:idx_tsfind_code" json:"ts_code"`
+	AnnDate           string    `gorm:"size:10;index:idx_tsfind_ann" json:"ann_date"`
+	EndDate           string    `gorm:"size:10" json:"end_date"`
+	Eps               float64   `json:"eps"`
+	Roe               float64   `json:"roe"`
+	RoeWaa            float64   `json:"roe_waa"`
+	GrossProfitMargin float64   `json:"grossprofit_margin"`
+	NetProfitMargin   float64   `json:"netprofit_margin"`
+	DebtToAssets      float64   `json:"debt_to_assets"`
+	CurrentRatio      float64   `json:"current_ratio"`
+	NetprofitYoy      float64   `json:"netprofit_yoy"`
+	OrYoy             float64   `json:"or_yoy"`
+	Bps               float64   `json:"bps"`
+	CreatedAt         time.Time `json:"created_at"`
 }
 
 // AutoMigrateBroadcastModels migrates broadcast-related models
@@ -456,21 +456,21 @@ func (h *Handler) getBroadcastCompany(c *gin.Context, keyword string) {
 	}
 
 	var items []TsStockBasic
-	repository.DB.Where("name LIKE ? OR ts_code LIKE ? OR symbol LIKE ? OR cnspell LIKE ?",
+	repository.DB.Where("name LIKE ? OR ts_code LIKE ? OR symbol LIKE ? OR cn_spell LIKE ?",
 		"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+strings.ToLower(keyword)+"%").
 		Limit(50).Find(&items)
 
 	results := []gin.H{}
 	for _, item := range items {
 		results = append(results, gin.H{
-			"code":     tsCodeToCode(item.TsCode),
-			"name":     item.Name,
-			"area":     item.Area,
-			"industry": item.Industry,
-			"market":   item.Market,
+			"code":      tsCodeToCode(item.TsCode),
+			"name":      item.Name,
+			"area":      item.Area,
+			"industry":  item.Industry,
+			"market":    item.Market,
 			"list_date": formatTradeDateForDisplay(item.ListDate),
-			"is_hs":    item.IsHs,
-			"act_name": item.ActName,
+			"is_hs":     item.IsHs,
+			"act_name":  item.ActName,
 		})
 	}
 
@@ -622,14 +622,14 @@ func (h *Handler) getBroadcastIncome(c *gin.Context, tsCode string) {
 	results := []gin.H{}
 	for _, item := range items {
 		results = append(results, gin.H{
-			"end_date":       formatTradeDateForDisplay(item.EndDate),
-			"ann_date":       formatTradeDateForDisplay(item.AnnDate),
-			"basic_eps":      item.BasicEps,
-			"total_revenue":  item.TotalRevenue,
-			"revenue":        item.Revenue,
-			"operate_profit": item.OperateProfit,
-			"total_profit":   item.TotalProfit,
-			"n_income":       item.NIncome,
+			"end_date":        formatTradeDateForDisplay(item.EndDate),
+			"ann_date":        formatTradeDateForDisplay(item.AnnDate),
+			"basic_eps":       item.BasicEps,
+			"total_revenue":   item.TotalRevenue,
+			"revenue":         item.Revenue,
+			"operate_profit":  item.OperateProfit,
+			"total_profit":    item.TotalProfit,
+			"n_income":        item.NIncome,
 			"n_income_attr_p": item.NIncomeAttrP,
 		})
 	}
@@ -700,11 +700,11 @@ func (h *Handler) getBroadcastCashflow(c *gin.Context, tsCode string) {
 	results := []gin.H{}
 	for _, item := range items {
 		results = append(results, gin.H{
-			"end_date":          formatTradeDateForDisplay(item.EndDate),
-			"n_cashflow_act":    item.NCashflowAct,
-			"n_cashflow_inv":    item.NCashflowInvAct,
-			"n_cashflow_fnc":    item.NCashFlowsFncAct,
-			"free_cashflow":     item.FreeCashflow,
+			"end_date":       formatTradeDateForDisplay(item.EndDate),
+			"n_cashflow_act": item.NCashflowAct,
+			"n_cashflow_inv": item.NCashflowInvAct,
+			"n_cashflow_fnc": item.NCashFlowsFncAct,
+			"free_cashflow":  item.FreeCashflow,
 		})
 	}
 
@@ -805,17 +805,17 @@ func (h *Handler) getBroadcastIndicator(c *gin.Context, tsCode string) {
 	results := []gin.H{}
 	for _, item := range items {
 		results = append(results, gin.H{
-			"end_date":          formatTradeDateForDisplay(item.EndDate),
-			"eps":               item.Eps,
-			"roe":               item.Roe,
-			"roe_waa":           item.RoeWaa,
+			"end_date":           formatTradeDateForDisplay(item.EndDate),
+			"eps":                item.Eps,
+			"roe":                item.Roe,
+			"roe_waa":            item.RoeWaa,
 			"grossprofit_margin": item.GrossProfitMargin,
-			"netprofit_margin":  item.NetProfitMargin,
-			"debt_to_assets":    item.DebtToAssets,
-			"current_ratio":     item.CurrentRatio,
-			"netprofit_yoy":     item.NetprofitYoy,
-			"or_yoy":            item.OrYoy,
-			"bps":               item.Bps,
+			"netprofit_margin":   item.NetProfitMargin,
+			"debt_to_assets":     item.DebtToAssets,
+			"current_ratio":      item.CurrentRatio,
+			"netprofit_yoy":      item.NetprofitYoy,
+			"or_yoy":             item.OrYoy,
+			"bps":                item.Bps,
 		})
 	}
 
@@ -997,18 +997,18 @@ func fetchAndSaveRecentExpress() {
 	items := make([]TsFinaExpress, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, TsFinaExpress{
-			TsCode:       tsString(row, "ts_code"),
-			AnnDate:      tsString(row, "ann_date"),
-			EndDate:      tsString(row, "end_date"),
-			Revenue:      tsFloat(row, "revenue"),
+			TsCode:        tsString(row, "ts_code"),
+			AnnDate:       tsString(row, "ann_date"),
+			EndDate:       tsString(row, "end_date"),
+			Revenue:       tsFloat(row, "revenue"),
 			OperateProfit: tsFloat(row, "operate_profit"),
-			NIncome:      tsFloat(row, "n_income"),
-			TotalAssets:  tsFloat(row, "total_assets"),
-			DilutedEps:   tsFloat(row, "diluted_eps"),
-			DilutedRoe:   tsFloat(row, "diluted_roe"),
-			YoySales:     tsFloat(row, "yoy_sales"),
-			YoyDeduNp:    tsFloat(row, "yoy_dedu_np"),
-			PerfSummary:  tsString(row, "perf_summary"),
+			NIncome:       tsFloat(row, "n_income"),
+			TotalAssets:   tsFloat(row, "total_assets"),
+			DilutedEps:    tsFloat(row, "diluted_eps"),
+			DilutedRoe:    tsFloat(row, "diluted_roe"),
+			YoySales:      tsFloat(row, "yoy_sales"),
+			YoyDeduNp:     tsFloat(row, "yoy_dedu_np"),
+			PerfSummary:   tsString(row, "perf_summary"),
 		})
 	}
 
@@ -1147,12 +1147,12 @@ func fetchAndSaveMainbz(tsCode string) {
 	items := make([]TsFinaMainbz, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, TsFinaMainbz{
-			TsCode:  tsString(row, "ts_code"),
-			EndDate: tsString(row, "end_date"),
-			BzItem:  tsString(row, "bz_item"),
-			BzSales: tsFloat(row, "bz_sales"),
+			TsCode:   tsString(row, "ts_code"),
+			EndDate:  tsString(row, "end_date"),
+			BzItem:   tsString(row, "bz_item"),
+			BzSales:  tsFloat(row, "bz_sales"),
 			BzProfit: tsFloat(row, "bz_profit"),
-			BzCost:  tsFloat(row, "bz_cost"),
+			BzCost:   tsFloat(row, "bz_cost"),
 		})
 	}
 	if len(items) > 0 {
@@ -1183,9 +1183,9 @@ func fetchAndSaveIndicator(tsCode string) {
 			NetProfitMargin:   tsFloat(row, "netprofit_margin"),
 			DebtToAssets:      tsFloat(row, "debt_to_assets"),
 			CurrentRatio:      tsFloat(row, "current_ratio"),
-			NetprofitYoy:     tsFloat(row, "netprofit_yoy"),
-			OrYoy:            tsFloat(row, "or_yoy"),
-			Bps:              tsFloat(row, "bps"),
+			NetprofitYoy:      tsFloat(row, "netprofit_yoy"),
+			OrYoy:             tsFloat(row, "or_yoy"),
+			Bps:               tsFloat(row, "bps"),
 		})
 	}
 	if len(items) > 0 {
@@ -1204,7 +1204,7 @@ func (h *Handler) GetBroadcastSearch(c *gin.Context) {
 	}
 
 	var items []TsStockBasic
-	repository.DB.Where("name LIKE ? OR ts_code LIKE ? OR symbol LIKE ? OR cnspell LIKE ?",
+	repository.DB.Where("name LIKE ? OR ts_code LIKE ? OR symbol LIKE ? OR cn_spell LIKE ?",
 		"%"+keyword+"%", "%"+keyword+"%", "%"+keyword+"%", "%"+strings.ToLower(keyword)+"%").
 		Limit(20).Find(&items)
 

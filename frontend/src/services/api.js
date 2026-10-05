@@ -1,4 +1,5 @@
 import axios from 'axios'
+import useStore from '../store/useStore'
 
 const api = axios.create({
   baseURL: '/api',
@@ -9,6 +10,12 @@ const api = axios.create({
 api.interceptors.request.use(config => {
   const token = localStorage.getItem('token')
   if (token) config.headers.Authorization = `Bearer ${token}`
+  // The backend uses this stable page key to organize disk snapshots under
+  // temp/pages/<page>. It never becomes part of authentication or response data.
+  config.headers['X-QuantMind-Page'] = useStore.getState().currentPage || 'shared'
+  if (config.params?.refresh === true || config.params?.refresh === 'true') {
+    config.headers['Cache-Control'] = 'no-cache'
+  }
   return config
 })
 
@@ -65,7 +72,7 @@ export const getTsRealTimeStats = (params) => api.get('/market/ts-realtime-stats
 export const getWatchlist = () => api.get('/watchlist')
 export const addWatchlistItem = (data) => api.post('/watchlist', data)
 export const removeWatchlistItem = (code) => api.delete(`/watchlist/${code}`)
-export const getWatchlistQuotes = () => api.get('/watchlist/quotes')
+export const getWatchlistQuotes = (params) => api.get('/watchlist/quotes', { params })
 
 // Agents
 export const listAgents = () => api.get('/agents')
@@ -117,7 +124,7 @@ export const getAIStockPicks = (params) => api.get('/market/ai-stock-picks', { p
 export const getAIStockPickBatches = (params) => api.get('/market/ai-stock-picks/batches', { params })
 export const runAIStockPick = (params) => api.post('/market/ai-stock-picks/run', null, { params })
 export const getAIStockPickDetail = (params) => api.get('/market/ai-stock-picks/detail', { params })
-export const getAIStockPickStats = () => api.get('/market/ai-stock-picks/stats')
+export const getAIStockPickStats = (params) => api.get('/market/ai-stock-picks/stats', { params })
 
 // System Settings
 export const getSystemSettings = () => api.get('/settings')

@@ -79,10 +79,10 @@ function MarketBroadcastTab() {
     { key: 'company', label: '上市公司', icon: <Building2 size={14} /> },
   ]
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (forceRefresh = false) => {
     setLoading(true)
     try {
-      const res = await getBroadcastMarket({ category, keyword })
+      const res = await getBroadcastMarket({ category, keyword, ...(forceRefresh ? { refresh: 'true' } : {}) })
       if (res?.code === 0) {
         setData(res.data)
       }
@@ -157,7 +157,7 @@ function MarketBroadcastTab() {
           <button type="submit" className="px-3 py-1.5 text-xs bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition">
             搜索
           </button>
-          <button type="button" onClick={fetchData} className="p-1.5 text-gray-400 hover:text-indigo-500 transition">
+          <button type="button" onClick={() => fetchData(true)} className="p-1.5 text-gray-400 hover:text-indigo-500 transition">
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>
         </form>
@@ -241,7 +241,9 @@ function STContent({ data }) {
           ))}
         </div>
       ) : (
-        <div className="text-center py-8 text-sm text-gray-400">暂无数据</div>
+        <div className="text-center py-8 text-sm text-gray-400">
+          暂无数据 · ST 风险股取自 Tushare <code className="text-xs">stock_st</code> 接口，当前 token 未开通该权限(40203)
+        </div>
       )}
     </div>
   )
@@ -347,12 +349,13 @@ function FinancialBroadcastTab() {
 
   const currentCat = categories.find(c => c.key === category)
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (forceRefresh = false) => {
     setLoading(true)
     try {
       const params = { category }
       if (tsCode) params.ts_code = tsCode
       if (keyword) params.keyword = keyword
+      if (forceRefresh) params.refresh = 'true'
       const res = await getBroadcastFinance(params)
       if (res?.code === 0) {
         setData(res.data)
@@ -462,7 +465,7 @@ function FinancialBroadcastTab() {
           <button type="submit" className="px-3 py-1.5 text-xs bg-indigo-500 text-white rounded-lg hover:bg-indigo-600 transition">
             查询
           </button>
-          <button type="button" onClick={fetchData} className="p-1.5 text-gray-400 hover:text-indigo-500 transition">
+          <button type="button" onClick={() => fetchData(true)} className="p-1.5 text-gray-400 hover:text-indigo-500 transition">
             <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>
         </form>
@@ -489,6 +492,11 @@ function FinancialBroadcastTab() {
           {category === 'indicator' && data?.items?.length > 0 && <IndicatorTable items={data.items} name={data.name} />}
           {category === 'audit' && data?.items?.length > 0 && <AuditTable items={data.items} name={data.name} />}
           {category === 'mainbz' && data?.items?.length > 0 && <MainbzTable items={data.items} name={data.name} />}
+          {!data?.message && !(data?.items?.length > 0) && (
+            <div className="text-center py-10 text-sm text-gray-400 bg-white rounded-xl border border-gray-100">
+              「{currentCat?.label}」暂无数据 · 取自 Tushare 财务类接口，当前 token 未开通相应权限(40203)
+            </div>
+          )}
         </div>
       )}
     </div>
