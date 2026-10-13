@@ -17,7 +17,10 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
     mootdx>=0.11.0
 
 # Copy application code
-COPY main.py .
+# 数据采集区已按数据源拆分：main.py 依赖同目录的 routes.py / common.py /
+# sources_*.py（以 `python main.py` 启动，脚本目录在 sys.path 中）。
+# 用通配复制，后续新增模块无需再改 Dockerfile。
+COPY *.py .
 
 # Expose port
 EXPOSE 9090

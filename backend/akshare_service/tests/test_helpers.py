@@ -8,6 +8,7 @@ import importlib.util
 import os
 import sys
 import time
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,11 @@ def _load_main():
 
 
 main = _load_main()
+
+# 数据采集区已拆分到 common / sources_*：monkeypatch 必须打在**调用点所在模块**
+# 上（unittest.mock 按名字查找），否则打在 main 上的替身不会被实现代码看到。
+import common as _common_mod  # noqa: E402
+import sources_market as _market_mod  # noqa: E402
 
 
 # ------------------------------------------------------------ get_prefix
@@ -108,16 +114,16 @@ def test_cache_roundtrip_within_ttl():
 
 def test_cache_expires_after_ttl():
     main.cache_set("k", {"v": 1})
-    with patch.object(main.time, "time", return_value=time.time() + main.CACHE_TTL["realtime"] + 1):
+    with patch.object(_common_mod.time, "time", return_value=time.time() + main.CACHE_TTL["realtime"] + 1):
         assert main.cache_get("k", "realtime") is None
 
 
 def test_cache_unknown_category_falls_back_to_default_ttl():
     main.cache_set("k", {"v": 1})
     ttl = main.CACHE_TTL["default"]
-    with patch.object(main.time, "time", return_value=time.time() + ttl - 1):
+    with patch.object(_common_mod.time, "time", return_value=time.time() + ttl - 1):
         assert main.cache_get("k", "unknown-category") == {"v": 1}
-    with patch.object(main.time, "time", return_value=time.time() + ttl + 1):
+    with patch.object(_common_mod.time, "time", return_value=time.time() + ttl + 1):
         assert main.cache_get("k", "unknown-category") is None
 
 
@@ -137,9 +143,9 @@ def test_trade_date_normalizes_dashed_input():
 
 
 def test_trade_date_falls_back_to_recent_weekday():
-    with patch.object(main, "datetime") as dt:
+    with patch.object(_market_mod, "datetime") as dt:
         # 2026-06-21 是周日 → 应回退到 2026-06-19（周五）
-        dt.now.return_value = dt.now.return_value if False else __import__("datetime").datetime(2026, 6, 21)
+        dt.now.return_value = datetime(2026, 6, 21)
         result = main.get_trade_date()
     assert result == "20260619"
 
