@@ -1,0 +1,5 @@
+# 开发环境依赖（仅测试与静态检查需要，服务运行不需要）
+#   pip install -r requirements-dev.txt
+#   python -m pytest tests
+pytest>=7.0
+pyflakes>=3.0
