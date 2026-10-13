@@ -387,12 +387,15 @@ def test_exception_is_caught_and_reported_as_500():
     assert h.payload == {"code": -1, "error": "boom"}
 
 
-def test_404_index_paths_are_all_declared_in_do_get():
-    """404 索引里列出的每个端点都应在 do_GET 中有对应分支。"""
-    import inspect
-
-    source = inspect.getsource(main.DataServiceHandler.do_GET)
+def test_404_index_paths_are_all_registered():
+    """404 索引里列出的每个端点都必须在路由表中注册。"""
     h = call("/nope")
     listed = [e for e in h.payload["endpoints"] if not e.startswith("#")]
+    registered = set(main._ROUTES)
     for path in listed:
-        assert "'%s'" % path in source, "404 index advertises undeclared endpoint: %s" % path
+        assert path in registered, "404 index advertises unregistered endpoint: %s" % path
+
+
+def test_route_table_matches_documented_endpoint_count():
+    """路由表不应随重构丢失或增添端点（当前 39 个路径）。"""
+    assert len(main._ROUTES) == 39

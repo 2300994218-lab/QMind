@@ -95,6 +95,20 @@ import urllib.request
 import sys
 import os
 
+# --- 路由表（do_GET 的路径分发已抽取到 routes 模块） ---
+# 服务以 `python main.py` 启动，脚本目录在 sys.path 中；通过测试或 Go 侧
+# 以其他方式加载时路径可能缺失，这里兜底补一次。
+try:
+    import routes as _routes
+except ImportError:  # pragma: no cover - 仅非标准加载路径会走到
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import routes as _routes
+
+_ROUTES = _routes.ROUTES
+_ENDPOINT_INDEX = _routes.ENDPOINT_INDEX
+# handler 通过 ctx 访问本模块的 fetch_* 与 VERSION，避免 routes 反向 import
+_CTX = sys.modules[__name__]
+
 # ===================== Dependencies =====================
 try:
     import akshare as ak
@@ -1842,295 +1856,20 @@ class DataServiceHandler(BaseHTTPRequestHandler):
         path = parsed.path
         params = parse_qs(parsed.query)
         date_str = get_trade_date(params.get('trade_date', [None])[0] or params.get('date', [None])[0])
+        handler = _ROUTES.get(path)
 
         try:
-            # ===== Health =====
-            if path == '/health':
+            if handler is None:
                 self.send_json({
-                    "status": "ok",
-                    "version": VERSION,
-                    "mootdx": MOOTDX_AVAILABLE,
-                    "akshare": AKSHARE_AVAILABLE,
-                    "requests": REQUESTS_AVAILABLE,
-                    "em_min_interval": EM_MIN_INTERVAL,
-                    "data_sources": [
-                        "mootdx(通达信/TCP)", "腾讯财经", "同花顺", "百度股市通",
-                        "新浪财经", "巨潮cninfo", "同花顺一致预期", "iwencai",
-                        "东财push2", "东财datacenter", "东财reportapi",
-                        "东财search-api", "东财np-weblist"
-                    ],
-                    "total_sources": 13,
-                    "architecture": "七层数据架构 · 27+端点 · 13数据源 · 东财防封em_get()",
-                })
-
-            # ===== Layer 1: 行情层 =====
-            elif path == '/quote':
-                codes = params.get('codes', [''])[0].split(',')
-                codes = [c.strip() for c in codes if c.strip()]
-                if not codes:
-                    self.send_json({"code": -1, "error": "missing codes"}, 400)
-                    return
-                data = fetch_quote_tencent(codes)
-                self.send_json({"code": 0, "data": data, "source": "tencent", "note": "索引43=振幅%(已校准),46=PB"})
-
-            elif path == '/kline':
-                code = params.get('code', [''])[0]
-                freq_map = {'5min': 0, '15min': 1, '30min': 2, '60min': 3, 'daily': 9, 'weekly': 5, 'monthly': 6}
-                freq = freq_map.get(params.get('freq', ['daily'])[0], 9)
-                count = int(params.get('count', ['60'])[0])
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_kline_mootdx(code, freq, count)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "mootdx"})
-
-            elif path == '/kline/baidu':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_kline_baidu(code)
-                self.send_json({"code": 0, "data": data, "source": "baidu", "note": "自带MA5/MA10/MA20均线"})
-
-            elif path == '/minute':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_minute_mootdx(code)
-                self.send_json({"code": 0, "data": data, "source": "mootdx"})
-
-            # ===== Layer 2: 研报层 =====
-            elif path == '/research':
-                code = params.get('code', [''])[0]
-                if code:
-                    data = fetch_research_stock(code)
-                else:
-                    data = fetch_research_market()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_reportapi"})
-
-            elif path == '/research/market':
-                data = fetch_research_market()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_reportapi"})
-
-            # ===== Layer 3: 信号层 =====
-            elif path == '/northbound':
-                data = fetch_northbound()
-                self.send_json({"code": 0, "data": data, "source": "ths+eastmoney"})
-
-            elif path == '/hot_stocks':
-                data = fetch_hot_stocks()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "ths"})
-
-            elif path == '/concept_blocks':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_concept_blocks(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_slist"})
-
-            elif path == '/fund_flow':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_fund_flow_minute(code)
-                self.send_json({"code": 0, "data": data, "source": "eastmoney_push2"})
-
-            elif path == '/fund_flow_120d':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_fund_flow_120d(code)
-                self.send_json({"code": 0, "data": data, "source": "eastmoney_push2his"})
-
-            elif path == '/dragon_tiger':
-                code = params.get('code', [''])[0]
-                if code:
-                    data = fetch_dragon_tiger_stock(code)
-                else:
-                    data = fetch_dragon_tiger_daily(params.get('date', [None])[0])
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            elif path == '/dragon_tiger_daily':
-                date = params.get('date', [None])[0]
-                data = fetch_dragon_tiger_daily(date)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            elif path == '/lockup_expiry':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_lockup_expiry(code)
-                self.send_json({"code": 0, "data": data, "source": "eastmoney_datacenter"})
-
-            elif path == '/industry_rank':
-                data = fetch_industry_rank()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_push2"})
-
-            # ===== Layer 4: 资金面/筹码层 =====
-            elif path == '/margin':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_margin(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            elif path == '/block_trade':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_block_trade(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            elif path == '/shareholder_count':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_shareholder_count(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            elif path == '/dividend':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_dividend(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_datacenter"})
-
-            # ===== Layer 5: 新闻层 =====
-            elif path == '/news':
-                code = params.get('code', [''])[0]
-                if code:
-                    data = fetch_news_stock(code)
-                else:
-                    data = fetch_news_global()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney"})
-
-            elif path == '/news/market' or path == '/news/global':
-                data = fetch_news_global()
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney_np-weblist"})
-
-            elif path == '/guba':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_guba(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "eastmoney"})
-
-            # ===== Layer 6: 基础数据层 =====
-            elif path == '/f10' or path == '/finance':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_f10(code)
-                self.send_json({"code": 0, "data": data, "source": "mootdx"})
-
-            elif path == '/stock_info':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_stock_info_em(code)
-                self.send_json({"code": 0, "data": data, "source": "eastmoney_push2"})
-
-            elif path == '/financial_statements':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_financial_statements(code)
-                self.send_json({"code": 0, "data": data, "source": "sina"})
-
-            # ===== Layer 7: 公告层 =====
-            elif path == '/announce':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_announce_stock(code)
-                self.send_json({"code": 0, "data": data, "count": len(data), "source": "cninfo"})
-
-            # ===== 原有兼容接口 =====
-            elif path == '/limit_up':
-                data = fetch_limit_up(date_str)
-                self.send_json({"code": 0, "data": {"stocks": data, "count": len(data), "trade_date": date_str}})
-
-            elif path == '/limit_down':
-                data = fetch_limit_down(date_str)
-                self.send_json({"code": 0, "data": {"stocks": data, "count": len(data), "trade_date": date_str}})
-
-            elif path == '/broken_board':
-                data = fetch_broken_board(date_str)
-                self.send_json({"code": 0, "data": {"stocks": data, "count": len(data), "trade_date": date_str}})
-
-            elif path == '/board_ladder':
-                data = fetch_board_ladder(date_str)
-                self.send_json({"code": 0, "data": {**data, "trade_date": date_str}})
-
-            elif path == '/market_stats':
-                up = fetch_limit_up(date_str)
-                down = fetch_limit_down(date_str)
-                broken = fetch_broken_board(date_str)
-                highest = max([s.get('limit_times', 0) for s in up], default=0)
-                broken_rate = len(broken) / (len(up) + len(broken)) * 100 if (len(up) + len(broken)) > 0 else 0
-                self.send_json({"code": 0, "data": {
-                    "trade_date": date_str, "limit_up_count": len(up), "limit_down_count": len(down),
-                    "broken_count": len(broken), "highest_board": highest, "broken_rate": round(broken_rate, 1),
-                }})
-
-            elif path == '/concept_heat':
-                data = fetch_concept_heat()
-                self.send_json({"code": 0, "data": {"concepts": data, "count": len(data)}})
-
-            elif path == '/industry_heat':
-                data = fetch_industry_heat()
-                self.send_json({"code": 0, "data": {"sectors": data, "count": len(data)}})
-
-            elif path == '/market_overview':
-                data = fetch_market_overview(date_str)
-                self.send_json({"code": 0, "data": data})
-
-            elif path == '/all_stocks':
-                data = fetch_all_stocks()
-                self.send_json({"code": 0, "data": {"all_stocks": data, "count": len(data)}})
-
-            elif path == '/stock_quote':
-                code = params.get('code', [''])[0]
-                if not code:
-                    self.send_json({"code": -1, "error": "missing code"}, 400)
-                    return
-                data = fetch_quote_tencent([code])
-                if data:
-                    self.send_json({"code": 0, "data": data[0]})
-                else:
-                    self.send_json({"code": -1, "error": "not found"}, 404)
-
+                    "error": "Not found", "version": VERSION,
+                    "endpoints": _ENDPOINT_INDEX,
+                }, 404)
+                return
+            result = handler(_CTX, params, date_str)
+            if isinstance(result, tuple):
+                self.send_json(*result)
             else:
-                self.send_json({"error": "Not found", "version": VERSION, "endpoints": [
-                    "/health",
-                    "# 行情层(不封IP)", "/quote", "/kline", "/kline/baidu", "/minute",
-                    "# 研报层", "/research", "/research/market",
-                    "# 信号层", "/northbound", "/hot_stocks", "/concept_blocks",
-                    "/fund_flow", "/fund_flow_120d", "/dragon_tiger", "/dragon_tiger_daily",
-                    "/lockup_expiry", "/industry_rank",
-                    "# 资金面", "/margin", "/block_trade", "/shareholder_count", "/dividend",
-                    "# 新闻层", "/news", "/news/global", "/guba",
-                    "# 基础数据", "/f10", "/finance", "/stock_info", "/financial_statements",
-                    "# 公告层", "/announce",
-                    "# 兼容接口", "/limit_up", "/limit_down", "/broken_board", "/board_ladder",
-                    "/market_stats", "/concept_heat", "/industry_heat", "/market_overview",
-                    "/all_stocks", "/stock_quote"
-                ]}, 404)
-
+                self.send_json(result)
         except Exception as e:
             print(f"[DataService] Handler error: {e}")
             traceback.print_exc()
