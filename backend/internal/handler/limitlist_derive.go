@@ -69,13 +69,13 @@ var (
 // WarmDerivedLimitLists derives the most recent session on boot so the first dashboard
 // load after a restart does not stare at an empty ladder for ten seconds.
 func WarmDerivedLimitLists() {
-	go func() {
+	SafeGo("WarmDerivedLimitLists", func() {
 		time.Sleep(3 * time.Second) // let migrations and the trading-day probe settle
 		date := strings.ReplaceAll(currentSessionDate(), "-", "")
 		log.Printf("[LimitDerive] 启动预热 %s 往前 %d 场的涨跌停/连板…", date, derivedWarmSessions)
 		n := ensureDerivedLimitListsWindow(date, derivedWarmSessions)
 		log.Printf("[LimitDerive] 预热完成: %s 涨停 %d 只", date, n)
-	}()
+	})
 }
 
 func derivedLimitBackedOff() bool {
@@ -99,12 +99,12 @@ func startDerivedLimitLists(tradeDate string) {
 	if _, running := derivedLimitRuns.LoadOrStore(tradeDate, struct{}{}); running {
 		return
 	}
-	go func() {
+	SafeGo("startDerivedLimitLists", func() {
 		defer derivedLimitRuns.Delete(tradeDate)
 		if n := ensureDerivedLimitLists(tradeDate); n > 0 {
 			log.Printf("[LimitDerive] %s 按交易所涨停价推导完成: 涨停 %d 只", tradeDate, n)
 		}
-	}()
+	})
 }
 
 // derivedNonSession remembers dates the exchange calendar rejected, so a 周末或长假

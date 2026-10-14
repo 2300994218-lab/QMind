@@ -16,10 +16,8 @@ import (
 	"quantmind/internal/config"
 	"quantmind/internal/handler"
 	"quantmind/internal/middleware"
-	"quantmind/internal/mq"
 	"quantmind/internal/repository"
 	"quantmind/internal/version"
-	"quantmind/pkg/logger"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -27,7 +25,6 @@ import (
 
 func main() {
 	// Init
-	logger.Init()
 	cfg := config.Load()
 	middleware.SetJWTSecret(cfg.JWTSecret)
 	repository.InitDB(cfg)
@@ -41,9 +38,6 @@ func main() {
 
 	// Migrate Investment News models
 	handler.AutoMigrateNewsModels(repository.DB)
-
-	mq.InitRabbitMQ(cfg)
-	defer mq.Close()
 
 	// Demo rows land in the real market tables with no flag distinguishing them, so
 	// seeding the last 7 weekdays (holidays included) would fake up the dashboards.
@@ -61,10 +55,10 @@ func main() {
 	handler.StartHotMoneyScheduler()
 
 	// Backfill recent dragon tiger data on startup (past 5 trading days)
-	go handler.BackfillHotMoneyData(5)
+	handler.SafeGo("main.BackfillHotMoneyData", func() { handler.BackfillHotMoneyData(5) })
 
 	// Start AkShare Python microservice as fallback data source
-	go startAkShareService()
+	handler.SafeGo("main.startAkShareService", startAkShareService)
 
 	// 连板天梯/涨跌停榜 for closed sessions, derived from the exchange's own 涨停价
 	handler.WarmDerivedLimitLists()

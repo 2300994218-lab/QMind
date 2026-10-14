@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -38,9 +37,10 @@ var pageCacheSerial atomic.Uint64
 // authenticated user id is part of the key, so user-specific responses are
 // never shared between accounts.
 type PageCache struct {
-	root    string
-	stripes [64]sync.Mutex
-	now     func() time.Time
+	root string
+	now  func() time.Time
+	// builds dedups concurrent snapshot generation, one in-flight build per key.
+	builds *buildGate
 	// generation identifies this process. Cached snapshots are keyed by it so a
 	// restart - the usual way a data-source fix lands - cannot keep serving the
 	// payload the previous build produced, which matters most for the long TTLs the
@@ -86,6 +86,7 @@ func NewPageCache(root string) *PageCache {
 	pc := &PageCache{
 		root:       filepath.Clean(root),
 		now:        time.Now,
+		builds:     newBuildGate(),
 		generation: fmt.Sprintf("%d.%d", time.Now().UnixNano(), pageCacheSerial.Add(1)),
 	}
 	if err := os.MkdirAll(pc.root, 0o755); err != nil {
@@ -106,8 +107,11 @@ func (pc *PageCache) WithMarketFreeze(freezeWindow func(time.Time) (time.Duratio
 	return pc
 }
 
-// Middleware serves a fresh page snapshot when available. Mutating requests
-// invalidate the active page directory after a successful response.
+// Middleware serves a fresh page snapshot when available. Concurrent requests
+// for the same key share one generation: only the leader runs the downstream
+// handler, the others wait for its snapshot instead of queueing behind a lock
+// that also covered every other key in the stripe. Mutating requests invalidate
+// the active page directory after a successful response.
 func (pc *PageCache) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if pc.root == "" {
@@ -129,61 +133,114 @@ func (pc *PageCache) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		cachePath, requestLabel, hashByte := pc.cachePath(c, page)
-		lock := &pc.stripes[int(hashByte)%len(pc.stripes)]
-		lock.Lock()
-		defer lock.Unlock()
+		// Snapshot reads and writes need no lock: `write` publishes through a temp
+		// file plus rename, so a reader sees either the previous or the new payload,
+		// never a half-written one.
+		cachePath, requestLabel := pc.cachePath(c, page)
 
-		bypass := wantsRefresh(c)
-		if !bypass {
-			if entry, ok := pc.read(cachePath); ok {
-				c.Header("X-QuantMind-Cache", "HIT")
-				c.Header("X-QuantMind-Cache-Age", strconv.FormatInt(int64(pc.now().Sub(entry.CreatedAt).Seconds()), 10))
-				c.Data(entry.Status, entry.ContentType, entry.Body)
-				c.Abort()
-				return
-			}
-		}
-
-		if bypass {
+		// An explicit refresh asks for a rebuild, so it neither reads the snapshot nor
+		// joins one; it writes the new snapshot when the handler succeeds.
+		if wantsRefresh(c) {
 			c.Header("X-QuantMind-Cache", "REFRESH")
-		} else {
-			c.Header("X-QuantMind-Cache", "MISS")
-		}
-
-		writer := &cachedResponseWriter{ResponseWriter: c.Writer}
-		c.Writer = writer
-		c.Next()
-
-		body := writer.body.Bytes()
-		if c.Writer.Status() != http.StatusOK || len(body) == 0 || len(body) > maxCacheFileSize || !json.Valid(body) {
+			if entry, ok := pc.build(c, page, requestLabel); ok {
+				pc.store(cachePath, requestLabel, entry)
+			}
 			return
 		}
 
-		createdAt := pc.now()
-		entry := pageCacheEntry{
-			Schema:      pageCacheSchema,
-			AppVersion:  version.Version,
-			Generation:  pc.generation,
-			Page:        page,
-			Request:     requestLabel,
-			UserID:      userIDFromContext(c),
-			CreatedAt:   createdAt,
-			ExpiresAt:   createdAt.Add(pc.ttlFor(c.Request.URL.Path, canonicalQuery(c.Request.URL.Query()), createdAt)),
-			Status:      c.Writer.Status(),
-			ContentType: c.Writer.Header().Get("Content-Type"),
-			Body:        append(json.RawMessage(nil), body...),
+		if entry, ok := pc.read(cachePath); ok {
+			serveSnapshot(c, entry, pc.now())
+			return
 		}
-		if entry.ContentType == "" {
-			entry.ContentType = "application/json; charset=utf-8"
-		}
-		if err := pc.write(cachePath, entry); err != nil {
-			log.Printf("[PageCache] write failed for %s: %v", requestLabel, err)
+
+		for {
+			build, leader := pc.builds.acquire(cachePath)
+			if leader {
+				pc.runAsLeader(c, page, requestLabel, cachePath, build)
+				return
+			}
+			select {
+			case <-build.done:
+				if build.ok {
+					serveSnapshot(c, build.entry, pc.now())
+					return
+				}
+				// The leader produced nothing cacheable (or panicked before writing a
+				// snapshot), and it has released the slot: try again so this client is
+				// still served rather than handed an empty body.
+			case <-c.Request.Context().Done():
+				// The client is gone; the leader keeps building for whoever is left.
+				return
+			}
 		}
 	}
 }
 
-func (pc *PageCache) cachePath(c *gin.Context, page string) (string, string, byte) {
+// runAsLeader generates the snapshot for its key and hands it to the waiters. The
+// handler runs with no mutex held, so requests for other keys are unaffected by
+// how long the upstream takes.
+func (pc *PageCache) runAsLeader(c *gin.Context, page, requestLabel, cachePath string, build *pageBuild) {
+	var entry pageCacheEntry
+	var ok bool
+	// Deferred so the waiters are always released, even if the handler panics on
+	// the way out; gin's Recovery middleware catches it further up the chain.
+	defer func() { pc.builds.release(cachePath, build, entry, ok) }()
+
+	c.Header("X-QuantMind-Cache", "MISS")
+	entry, ok = pc.build(c, page, requestLabel)
+	if ok {
+		pc.store(cachePath, requestLabel, entry)
+	}
+}
+
+// build runs the downstream handler while capturing its body, and returns the
+// snapshot the response describes. ok=false means the response is not cacheable,
+// in which case the handler has already answered the client itself.
+func (pc *PageCache) build(c *gin.Context, page, requestLabel string) (pageCacheEntry, bool) {
+	writer := &cachedResponseWriter{ResponseWriter: c.Writer}
+	c.Writer = writer
+	c.Next()
+
+	body := writer.body.Bytes()
+	if c.Writer.Status() != http.StatusOK || len(body) == 0 || len(body) > maxCacheFileSize || !json.Valid(body) {
+		return pageCacheEntry{}, false
+	}
+
+	createdAt := pc.now()
+	entry := pageCacheEntry{
+		Schema:      pageCacheSchema,
+		AppVersion:  version.Version,
+		Generation:  pc.generation,
+		Page:        page,
+		Request:     requestLabel,
+		UserID:      userIDFromContext(c),
+		CreatedAt:   createdAt,
+		ExpiresAt:   createdAt.Add(pc.ttlFor(c.Request.URL.Path, canonicalQuery(c.Request.URL.Query()), createdAt)),
+		Status:      c.Writer.Status(),
+		ContentType: c.Writer.Header().Get("Content-Type"),
+		Body:        append(json.RawMessage(nil), body...),
+	}
+	if entry.ContentType == "" {
+		entry.ContentType = "application/json; charset=utf-8"
+	}
+	return entry, true
+}
+
+func (pc *PageCache) store(cachePath, requestLabel string, entry pageCacheEntry) {
+	if err := pc.write(cachePath, entry); err != nil {
+		log.Printf("[PageCache] write failed for %s: %v", requestLabel, err)
+	}
+}
+
+// serveSnapshot answers from an already captured response, without the handler.
+func serveSnapshot(c *gin.Context, entry pageCacheEntry, now time.Time) {
+	c.Header("X-QuantMind-Cache", "HIT")
+	c.Header("X-QuantMind-Cache-Age", strconv.FormatInt(int64(now.Sub(entry.CreatedAt).Seconds()), 10))
+	c.Data(entry.Status, entry.ContentType, entry.Body)
+	c.Abort()
+}
+
+func (pc *PageCache) cachePath(c *gin.Context, page string) (string, string) {
 	query := canonicalQuery(c.Request.URL.Query()).Encode()
 	requestLabel := c.Request.URL.Path
 	if query != "" {
@@ -193,7 +250,7 @@ func (pc *PageCache) cachePath(c *gin.Context, page string) (string, string, byt
 	identity := fmt.Sprintf("v%s\n%s\n%s\n%d", version.Version, page, requestLabel, userID)
 	hash := sha256.Sum256([]byte(identity))
 	name := readableRouteName(c.Request.URL.Path) + "__" + hex.EncodeToString(hash[:12]) + ".json"
-	return filepath.Join(pc.root, page, name), requestLabel, hash[0]
+	return filepath.Join(pc.root, page, name), requestLabel
 }
 
 func (pc *PageCache) read(path string) (pageCacheEntry, bool) {

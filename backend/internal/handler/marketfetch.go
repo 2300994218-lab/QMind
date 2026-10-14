@@ -22,7 +22,7 @@ import (
 // FetchMarketData - manually trigger market data fetch from Eastmoney
 func (h *Handler) FetchMarketData(c *gin.Context) {
 	date := queryDate(c, "date")
-	go fetchAllMarketData(date)
+	SafeGo("Handler.FetchMarketData.fetchAllMarketData", func() { fetchAllMarketData(date) })
 	response.Success(c, gin.H{"message": "正在获取市场数据", "date": date})
 }
 

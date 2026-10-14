@@ -145,7 +145,9 @@ func (h *Handler) GetSectorHeat(c *gin.Context) {
 
 	if len(allSectors) > 0 {
 		// Persist to DB
-		go persistSectorHeatData(allSectors, "sector", today)
+		SafeGo("Handler.GetSectorHeat.persistSectorHeat", func() {
+			persistSectorHeatData(allSectors, "sector", today)
+		})
 	} else {
 		// Fallback: read from DB
 		var dbRecords []model.SectorHeat

@@ -34,7 +34,7 @@ const screeningCooldown = 30 * time.Minute
 // StartAIStockPickScheduler starts the screening scheduler
 // Runs at 13:30, 14:30, 15:30 China time on trading days
 func StartAIStockPickScheduler() {
-	go func() {
+	SafeGo("AIStockPickScheduler.loop", func() {
 		log.Println("[隔夜套利] 定时筛选调度器已启动 - 交易日13:30/14:30/15:30自动运行")
 
 		// Check every minute if it's time to run
@@ -79,9 +79,11 @@ func StartAIStockPickScheduler() {
 			}
 
 			log.Printf("[隔夜套利] 定时触发筛选 %s %02d:%02d", tradeDate, hour, minute)
-			go runAIStockScreening(tradeDate)
+			SafeGo("AIStockPickScheduler.runAIStockScreening", func() {
+				runAIStockScreening(tradeDate)
+			})
 		}
-	}()
+	})
 }
 
 // reserveScreening checks the run gates and writes the batch record.
@@ -1245,7 +1247,7 @@ func (h *Handler) RunAIStockPick(c *gin.Context) {
 		return
 	}
 
-	go runScreeningForBatch(tradeDate, batch)
+	SafeGo("Handler.RunAIStockPick", func() { runScreeningForBatch(tradeDate, batch) })
 
 	message := "隔夜套利筛选任务已启动，正在获取实时行情..."
 	if !isTradingNow(now) {

@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -52,6 +54,16 @@ func AuthMiddleware() gin.HandlerFunc {
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(t *jwt.Token) (interface{}, error) {
+			// Pin the algorithm the issuer actually uses (HS256 above). Without this
+			// check the key material is handed to whatever algorithm the token header
+			// claims, so a token naming a different signer would still verify.
+			algorithm := ""
+			if t.Method != nil {
+				algorithm = t.Method.Alg()
+			}
+			if algorithm != jwt.SigningMethodHS256.Alg() {
+				return nil, fmt.Errorf("unexpected signing method: %v", algorithm)
+			}
 			return JWTSecret, nil
 		})
 
@@ -103,7 +115,7 @@ func AuditMiddleware() gin.HandlerFunc {
 			status = "failed"
 		}
 
-		log := model.AuditLog{
+		auditLog := model.AuditLog{
 			UserID:    uid,
 			Username:  uname,
 			Module:    module,
@@ -115,7 +127,12 @@ func AuditMiddleware() gin.HandlerFunc {
 			Status:    status,
 			Duration:  duration,
 		}
-		repository.DB.Create(&log)
+		// A dropped audit row must not take the response down with it, but it has to
+		// leave a trace: an empty audit table would otherwise look like nobody ever
+		// called. Named `auditLog` so it cannot shadow the log package used here.
+		if err := repository.DB.Create(&auditLog).Error; err != nil {
+			log.Printf("[Audit] failed to persist audit log for %s %s: %v", c.Request.Method, path, err)
+		}
 	}
 }
 

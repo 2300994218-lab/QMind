@@ -209,7 +209,7 @@ func AutoMigrateBroadcastModels(db *gorm.DB) {
 	log.Println("[Broadcast] Broadcast models migrated")
 
 	// Pre-load stock basic list in background
-	go ensureStockBasicList()
+	SafeGo("AutoMigrateBroadcastModels.ensureStockBasicList", ensureStockBasicList)
 }
 
 // ensureStockBasicList loads stock basic info

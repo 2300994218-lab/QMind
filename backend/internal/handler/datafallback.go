@@ -402,31 +402,32 @@ func limitUpCodesFromKLines(codes []string, lookbackDays int) map[string]bool {
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
-	for _, code := range codes {
-		wg.Add(1)
-		go func(c string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+	checkLimitUp := func(c string) {
+		defer wg.Done()
+		sem <- struct{}{}
+		defer func() { <-sem }()
 
-			bars, _, err := fetchPeriodKLineFallback(c, "day", lookbackDays+1)
-			if err != nil || len(bars) < 2 {
+		bars, _, err := fetchPeriodKLineFallback(c, "day", lookbackDays+1)
+		if err != nil || len(bars) < 2 {
+			return
+		}
+		for i := 1; i < len(bars); i++ {
+			prevClose, _ := bars[i-1]["close"].(float64)
+			closePrice, _ := bars[i]["close"].(float64)
+			if prevClose <= 0 || closePrice <= 0 {
+				continue
+			}
+			if closePrice >= roundTo2(prevClose*1.1)-0.001 {
+				mu.Lock()
+				result[extractPureCode(c)] = true
+				mu.Unlock()
 				return
 			}
-			for i := 1; i < len(bars); i++ {
-				prevClose, _ := bars[i-1]["close"].(float64)
-				closePrice, _ := bars[i]["close"].(float64)
-				if prevClose <= 0 || closePrice <= 0 {
-					continue
-				}
-				if closePrice >= roundTo2(prevClose*1.1)-0.001 {
-					mu.Lock()
-					result[extractPureCode(c)] = true
-					mu.Unlock()
-					return
-				}
-			}
-		}(code)
+		}
+	}
+	for _, code := range codes {
+		wg.Add(1)
+		SafeGo("DataFallback.limitUpCodesFromKLines", func() { checkLimitUp(code) })
 	}
 	wg.Wait()
 	return result

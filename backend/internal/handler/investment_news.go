@@ -456,21 +456,22 @@ func (h *Handler) fetchAndStoreNews() {
 
 	// Fetch all RSS feeds concurrently
 	sem := make(chan struct{}, 5) // limit concurrency
+	fetchSource := func(s newsSource) {
+		defer wg.Done()
+		sem <- struct{}{}
+		defer func() { <-sem }()
+
+		items := fetchRSSFeed(s, since)
+		if len(items) > 0 {
+			mu.Lock()
+			allItems[s.Hint] = append(allItems[s.Hint], items...)
+			mu.Unlock()
+			log.Printf("[News] %s: %d items", s.Name, len(items))
+		}
+	}
 	for _, src := range newsSources {
 		wg.Add(1)
-		go func(s newsSource) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			items := fetchRSSFeed(s, since)
-			if len(items) > 0 {
-				mu.Lock()
-				allItems[s.Hint] = append(allItems[s.Hint], items...)
-				mu.Unlock()
-				log.Printf("[News] %s: %d items", s.Name, len(items))
-			}
-		}(src)
+		SafeGo("News.fetchSource."+src.Hint, func() { fetchSource(src) })
 	}
 	wg.Wait()
 
@@ -634,7 +635,7 @@ func (h *Handler) GetNewsDates(c *gin.Context) {
 }
 
 func (h *Handler) RefreshInvestmentNews(c *gin.Context) {
-	go h.fetchAndStoreNews()
+	SafeGo("Handler.RefreshInvestmentNews", h.fetchAndStoreNews)
 	response.Success(c, gin.H{"message": "资讯刷新任务已启动，请稍后查看"})
 }
 
@@ -647,15 +648,15 @@ func StartNewsScheduler(h *Handler) {
 	repository.DB.Model(&InvestmentNews{}).Where("fetch_date = ?", today).Count(&count)
 	if count == 0 {
 		log.Println("[News] No data for today, triggering initial fetch...")
-		go h.fetchAndStoreNews()
+		SafeGo("NewsScheduler.startupFetch", h.fetchAndStoreNews)
 	}
 
 	// Schedule every 4 hours
-	go func() {
+	SafeGo("NewsScheduler.loop", func() {
 		ticker := time.NewTicker(4 * time.Hour)
 		defer ticker.Stop()
 		for range ticker.C {
-			h.fetchAndStoreNews()
+			SafeGo("NewsScheduler.tickFetch", h.fetchAndStoreNews)
 		}
-	}()
+	})
 }

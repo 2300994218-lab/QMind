@@ -187,7 +187,7 @@ func AutoMigrateDashboardModels(db *gorm.DB) {
 	log.Println("[Dashboard] Tushare dashboard models migrated")
 
 	// Pre-load hot money list in background
-	go ensureHotMoneyList()
+	SafeGo("AutoMigrateDashboardModels.ensureHotMoneyList", ensureHotMoneyList)
 }
 
 // ensureHotMoneyList loads the hot money list from DB or fetches from Tushare API
@@ -2239,7 +2239,7 @@ func (h *Handler) GetTsRealTimeStats(c *gin.Context) {
 	totalAmountWanYi := totalAmount / 10000 // 亿 -> 万亿 (for DB storage consistency)
 
 	// Persist to MarketSentiment in background (TotalAmount stored in 万亿)
-	go func() {
+	SafeGo("Handler.GetTsRealTimeStats.persistMarketSentiment", func() {
 		today := formatTradeDateForDisplay(tradeDate)
 		sentiment := model.MarketSentiment{
 			Score:          math.Round(sentimentScore*10) / 10,
@@ -2258,7 +2258,7 @@ func (h *Handler) GetTsRealTimeStats(c *gin.Context) {
 		} else {
 			repository.DB.Where("trade_date = ?", today).Updates(&sentiment)
 		}
-	}()
+	})
 
 	response.Success(c, gin.H{
 		"trade_date": formatTradeDateForDisplay(tradeDate),

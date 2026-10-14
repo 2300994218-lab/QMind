@@ -31,19 +31,19 @@ var (
 // StartHotMoneyScheduler starts the daily dragon tiger data collection scheduler
 // Runs after market close (15:30+) to fetch complete daily data
 func StartHotMoneyScheduler() {
-	go func() {
+	SafeGo("HotMoneyScheduler.loop", func() {
 		log.Println("[HotMoney] Scheduler started - fetches daily dragon tiger data after market close")
 
 		// Run immediately on start to backfill if needed
-		go hotMoneySchedulerRun()
+		SafeGo("HotMoneyScheduler.startupRun", hotMoneySchedulerRun)
 
 		// Check every 30 minutes
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
-			go hotMoneySchedulerRun()
+			SafeGo("HotMoneyScheduler.tickRun", hotMoneySchedulerRun)
 		}
-	}()
+	})
 }
 
 func hotMoneySchedulerRun() {
@@ -693,7 +693,7 @@ func (h *Handler) HotMoneyBackfill(c *gin.Context) {
 		days = 60
 	}
 
-	go BackfillHotMoneyData(days)
+	SafeGo("Handler.HotMoneyBackfill", func() { BackfillHotMoneyData(days) })
 
 	response.Success(c, gin.H{
 		"message": fmt.Sprintf("Backfill started for %d trading days", days),

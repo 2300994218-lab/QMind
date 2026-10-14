@@ -842,7 +842,9 @@ func (h *Handler) GetConceptHeat(c *gin.Context) {
 
 	if len(allConcepts) > 0 {
 		// Persist to DB
-		go persistSectorHeatData(allConcepts, "concept", today)
+		SafeGo("Handler.GetConceptHeat.persistSectorHeat", func() {
+			persistSectorHeatData(allConcepts, "concept", today)
+		})
 	} else {
 		// Fallback: read from DB
 		var dbRecords []model.SectorHeat
@@ -1469,7 +1471,7 @@ func (h *Handler) GetRealTimeStats(c *gin.Context) {
 	})
 
 	// Persist real-time stats to DB in background
-	go func() {
+	SafeGo("Handler.GetRealTimeStats.persistRealTimeStats", func() {
 		today := currentSessionDate()
 		sentiment := model.MarketSentiment{
 			Score:          math.Round(sentimentScore*10) / 10,
@@ -1525,7 +1527,7 @@ func (h *Handler) GetRealTimeStats(c *gin.Context) {
 			repository.DB.Create(&board)
 		}
 		log.Printf("[Persist] Saved real-time stats to DB: limitUp=%d, broken=%d", limitUpCount, brokenCount)
-	}()
+	})
 }
 
 // safeGinFloat safely gets a float from gin.H
@@ -2470,7 +2472,7 @@ func (h *Handler) GetRealDashboardData(c *gin.Context) {
 
 	today := currentSessionDate()
 	if forceRefresh || date == today {
-		go fetchAllMarketData(date)
+		SafeGo("Handler.GetRealDashboardData.fetchAllMarketData", func() { fetchAllMarketData(date) })
 	}
 
 	h.GetDashboardEnhanced(c)
