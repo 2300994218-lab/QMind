@@ -18,6 +18,7 @@ export default function AIStockPickPage() {
   const [batches, setBatches] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
   const [running, setRunning] = useState(false)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
@@ -41,9 +42,13 @@ export default function AIStockPickPage() {
         setTotalPages(res.data.total_pages || 1)
         setTotal(res.data.total || 0)
         if (res.data.batches) setBatches(res.data.batches)
+        setError(false)
+      } else {
+        setError(true)
       }
     } catch (e) {
-      console.error('Failed to fetch picks', e)
+      setError(true)
+      toast.error('筛选结果加载失败')
     }
     setLoading(false)
   }, [page, selectedBatchId])
@@ -215,6 +220,12 @@ export default function AIStockPickPage() {
               {loading ? (
                 <tr><td colSpan={11} className="text-center py-20 text-gray-400">
                   <RefreshCw size={20} className="animate-spin mx-auto mb-2" />加载中...
+                </td></tr>
+              ) : error ? (
+                <tr><td colSpan={11} className="text-center py-20 text-gray-400">
+                  <AlertTriangle size={24} className="mx-auto mb-2 text-red-400" />
+                  <p>加载失败，请检查网络或登录状态</p>
+                  <button onClick={() => fetchData(true)} className="mt-3 px-4 py-1.5 rounded-lg text-sm text-white font-medium" style={{ background: '#513CC8' }}>重试</button>
                 </td></tr>
               ) : picks.length === 0 ? (
                 <tr><td colSpan={11} className="text-center py-20 text-gray-400">

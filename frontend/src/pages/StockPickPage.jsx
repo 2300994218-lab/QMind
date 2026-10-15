@@ -7,6 +7,7 @@ import { localDateStr } from '../utils/date'
 export default function StockPickPage() {
   const [picks, setPicks] = useState([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(false)
   const [filterDate, setFilterDate] = useState(localDateStr())
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -19,8 +20,9 @@ export default function StockPickPage() {
     setLoading(true)
     try {
       const res = await listStockPicks({ date: filterDate, page_size: 100, ...(forceRefresh ? { refresh: 'true' } : {}) })
-      if (res?.code === 0) setPicks(res.data?.items || [])
-    } catch (e) { console.error(e) }
+      if (res?.code === 0) { setPicks(res.data?.items || []); setError(false) }
+      else setError(true)
+    } catch (e) { setError(true); toast.error('推荐列表加载失败') }
     setLoading(false)
   }, [filterDate])
 
@@ -115,6 +117,16 @@ export default function StockPickPage() {
         {loading ? (
           <div className="col-span-full text-center py-12 text-gray-400">
             <RefreshCw size={24} className="animate-spin mx-auto mb-2" /> 加载中...
+          </div>
+        ) : error ? (
+          <div className="col-span-full glass-card p-12 text-center">
+            <h3 className="text-lg text-gray-700 mb-2 font-medium">加载失败</h3>
+            <p className="text-sm text-gray-400 mb-4">请检查网络或登录状态后重试</p>
+            <button onClick={() => loadPicks(true)}
+              className="px-5 py-2.5 rounded-xl text-sm text-white font-medium"
+              style={{ background: '#513CC8' }}>
+              <RefreshCw size={16} className="inline mr-1" /> 重试
+            </button>
           </div>
         ) : picks.length === 0 ? (
           <div className="col-span-full glass-card p-12 text-center">

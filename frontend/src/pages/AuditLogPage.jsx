@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { getAuditLogs } from '../services/api'
 import { Shield, Filter, ChevronLeft, ChevronRight } from 'lucide-react'
+import toast from 'react-hot-toast'
 
 const MODULE_OPTIONS = ['', 'login', 'agent', 'market', 'strategy', 'data', 'admin', 'audit', 'other']
 const MODULE_LABELS = { login: '登录', agent: '智能体', market: '行情', strategy: '策略', data: '数据', admin: '管理', audit: '审计', other: '其他' }
@@ -9,6 +10,7 @@ const MODULE_COLORS = { login: '#3B82F6', agent: '#513CC8', market: '#EF4444', s
 export default function AuditLogPage() {
   const [logs, setLogs] = useState([])
   const [total, setTotal] = useState(0)
+  const [error, setError] = useState(false)
   const [page, setPage] = useState(1)
   const [module, setModule] = useState('')
   const [username, setUsername] = useState('')
@@ -21,8 +23,11 @@ export default function AuditLogPage() {
       if (res.code === 0) {
         setLogs(res.data?.items || [])
         setTotal(res.data?.total || 0)
+        setError(false)
+      } else {
+        setError(true)
       }
-    } catch (e) {}
+    } catch (e) { setError(true); toast.error('审计日志加载失败') }
   }
 
   const totalPages = Math.ceil(total / 20)
@@ -64,7 +69,12 @@ export default function AuditLogPage() {
             </tr>
           </thead>
           <tbody>
-            {logs.map((log, i) => (
+            {error ? (
+              <tr><td colSpan={9} className="text-center p-8">
+                <p className="text-red-500 text-sm mb-3">加载失败，请检查网络或登录状态</p>
+                <button onClick={load} className="px-4 py-1.5 rounded-lg text-sm text-white font-medium" style={{ background: '#513CC8' }}>重试</button>
+              </td></tr>
+            ) : logs.map((log, i) => (
               <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50 transition">
                 <td className="p-3 text-xs text-gray-500 whitespace-nowrap">
                   {new Date(log.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -88,7 +98,7 @@ export default function AuditLogPage() {
                 <td className="p-3 text-right text-xs text-gray-400">{log.ip}</td>
               </tr>
             ))}
-            {logs.length === 0 && (
+            {!error && logs.length === 0 && (
               <tr><td colSpan={9} className="text-center p-8 text-gray-400">暂无审计日志</td></tr>
             )}
           </tbody>

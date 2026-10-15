@@ -5,6 +5,7 @@ import toast from 'react-hot-toast'
 
 export default function UsersPage() {
   const [users, setUsers] = useState([])
+  const [error, setError] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ username: '', password: '', display_name: '', email: '', role: 'user', is_active: true })
@@ -14,8 +15,9 @@ export default function UsersPage() {
   const load = async () => {
     try {
       const res = await listUsers()
-      if (res.code === 0) setUsers(res.data || [])
-    } catch (e) {}
+      if (res.code === 0) { setUsers(res.data || []); setError(false) }
+      else setError(true)
+    } catch (e) { setError(true); toast.error('用户列表加载失败') }
   }
 
   const handleSave = async () => {
@@ -63,7 +65,14 @@ export default function UsersPage() {
             </tr>
           </thead>
           <tbody>
-            {users.map(u => (
+            {error ? (
+              <tr><td colSpan={5} className="text-center p-8">
+                <p className="text-red-500 text-sm mb-3">加载失败，请检查网络或登录状态</p>
+                <button onClick={load} className="px-4 py-1.5 rounded-lg text-sm text-white font-medium" style={{ background: '#513CC8' }}>重试</button>
+              </td></tr>
+            ) : users.length === 0 ? (
+              <tr><td colSpan={5} className="text-center p-8 text-gray-400">暂无用户</td></tr>
+            ) : users.map(u => (
               <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                 <td className="p-3">
                   <div className="flex items-center gap-2">
