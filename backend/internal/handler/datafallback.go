@@ -100,36 +100,27 @@ func barsFromSinaRows(rows []map[string]interface{}) []gin.H {
 	return bars
 }
 
-// fetchTencentKLine pulls qfq bars of cat (day|week|month), oldest-first.
-func fetchTencentKLine(code, cat string, limit int) ([]gin.H, error) {
-	sym := sinaSymbol(code)
-	url := fmt.Sprintf("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,%s,,,%d,qfq", sym, cat, limit)
-	var raw struct {
-		Code int                                   `json:"code"`
-		Data map[string]map[string]json.RawMessage `json:"data"`
+// tencentKLineNode picks the kline array for cat (day|week|month) out of one
+// Tencent fqkline node. The forward-adjusted key is "qfq"+cat (qfqday,
+// qfqweek, qfqmonth); the unadjusted key is cat itself. A qfq request answers
+// with the qfq key, so it is probed first and the raw key is the fallback.
+func tencentKLineNode(node map[string]json.RawMessage, cat string) (json.RawMessage, bool) {
+	for _, key := range []string{"qfq" + cat, cat} {
+		if arr, ok := node[key]; ok && len(arr) > 0 {
+			return arr, true
+		}
 	}
-	if err := getJSON(url, "https://gu.qq.com", 15*time.Second, &raw); err != nil {
-		return nil, fmt.Errorf("腾讯K线: %v", err)
-	}
-	node, ok := raw.Data[sym]
-	if !ok {
-		return nil, fmt.Errorf("腾讯K线: 无 %s 数据", sym)
-	}
-	arr := node[cat+"qfqday"]
-	if len(arr) == 0 {
-		arr = node["qfq"+cat+"day"]
-	}
-	if len(arr) == 0 {
-		arr = node[cat+"day"]
-	}
-	var rows [][]string
-	if err := json.Unmarshal(arr, &rows); err != nil {
-		return nil, fmt.Errorf("腾讯K线解析失败: %v", err)
-	}
-	prevClose := 0.0
+	return nil, false
+}
+
+// barsFromTencentRows converts Tencent qfq kline rows (oldest-first) into the
+// common bar shape. Rows are [date, open, close, high, low, volume(手), ...];
+// index 8, when present, is the change percentage. volume is converted 手 -> 股.
+func barsFromTencentRows(rows [][]string) []gin.H {
 	bars := make([]gin.H, 0, len(rows))
+	prevClose := 0.0
 	for _, r := range rows {
-		if len(r) < 5 {
+		if len(r) < 6 {
 			continue
 		}
 		open, _ := strconv.ParseFloat(r[1], 64)
@@ -159,6 +150,33 @@ func fetchTencentKLine(code, cat string, limit int) ([]gin.H, error) {
 		})
 		prevClose = closePrice
 	}
+	return bars
+}
+
+// fetchTencentKLine pulls qfq bars of cat (day|week|month), oldest-first.
+func fetchTencentKLine(code, cat string, limit int) ([]gin.H, error) {
+	sym := sinaSymbol(code)
+	url := fmt.Sprintf("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=%s,%s,,,%d,qfq", sym, cat, limit)
+	var raw struct {
+		Code int                                   `json:"code"`
+		Data map[string]map[string]json.RawMessage `json:"data"`
+	}
+	if err := getJSON(url, "https://gu.qq.com", 15*time.Second, &raw); err != nil {
+		return nil, fmt.Errorf("腾讯K线: %v", err)
+	}
+	node, ok := raw.Data[sym]
+	if !ok {
+		return nil, fmt.Errorf("腾讯K线: 无 %s 数据", sym)
+	}
+	arr, ok := tencentKLineNode(node, cat)
+	if !ok {
+		return nil, fmt.Errorf("腾讯K线: %s 无 %s K线数据", sym, cat)
+	}
+	var rows [][]string
+	if err := json.Unmarshal(arr, &rows); err != nil {
+		return nil, fmt.Errorf("腾讯K线解析失败: %v", err)
+	}
+	bars := barsFromTencentRows(rows)
 	if len(bars) == 0 {
 		return nil, fmt.Errorf("腾讯K线: %s 无数据", sym)
 	}
