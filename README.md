@@ -780,3 +780,15 @@ QuantMind 集成了以下优秀开源项目的思想和技术：
   <br/>
   <sub>Built with Go + React + AI</sub>
 </p>
+
+---
+
+## 本地文档层（个人维护，不入库）
+
+本仓库根目录下的 `README/` 是**本地私有文档库**（已列入 `.gitignore`，不提交、不对外分发），记录本机运行口径、工程坑与决策记录：
+
+- 入口：`README/README.md`（总说明：版本落点表、目录地图、文档体系规则、根 README 章节→分域篇目拆分映射、README 与代码矛盾登记表）
+- 规则：`README/AI-rules.md`（AI 每次会话必读纪律与铁律）
+- 分域篇目：`README/A1~A6`（功能说明）、`README/B1~B6`（操作手册）、`README/C1-变更记录.md`
+
+口径优先级：**代码 > 本地文档层 > 本 README**；本 README 中与代码不一致的条目已在本地库登记待修。
