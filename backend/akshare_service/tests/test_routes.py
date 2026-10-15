@@ -186,6 +186,12 @@ def test_kline_accepts_count():
     assert fk.call_args[0][2] == 120
 
 
+def test_kline_invalid_count_returns_400():
+    h = call("/kline?code=000001&count=abc")
+    assert h.status == 400
+    assert h.payload == {"code": -1, "error": "invalid count"}
+
+
 def test_kline_missing_code_returns_400():
     h = call("/kline")
     assert h.status == 400

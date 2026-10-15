@@ -79,9 +79,12 @@ def quote(ctx, params, date_str):
 def kline(ctx, params, date_str):
     code = params.get("code", [""])[0]
     freq = _KLINE_FREQ_MAP.get(params.get("freq", ["daily"])[0], 9)
-    count = int(params.get("count", ["60"])[0])
     if not code:
         return _missing("code")
+    try:
+        count = int(params.get("count", ["60"])[0])
+    except (TypeError, ValueError):
+        return ({"code": -1, "error": "invalid count"}, 400)
     data = ctx.fetch_kline_mootdx(code, freq, count)
     return _listed(data, "mootdx")
 
