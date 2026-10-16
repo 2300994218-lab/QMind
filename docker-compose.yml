@@ -1,5 +1,6 @@
-version: '3.8'
-
+# 镜像标签与仓库 VERSION 同步（当前 V1.3.0，镜像 tag 用小写 v 遵循 Docker 惯例），
+# 可用环境变量覆盖，例如：QMIND_BACKEND_IMAGE=qmind-backend:v1.3.0 docker compose up -d --build
+# 数据卷 mysql_data / rabbitmq_data 为固定名命名卷（勿改名，否则容器起来读不到旧数据）。
 services:
   mysql:
     image: mysql:8.0
@@ -50,6 +51,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       network: host
+    image: ${QMIND_BACKEND_IMAGE:-qmind-backend:v1.3.0}
     container_name: quantmind-backend
     environment:
       SERVER_PORT: "8080"
@@ -94,6 +96,7 @@ services:
       context: ./backend/akshare_service
       dockerfile: Dockerfile
       network: host
+    image: ${QMIND_AKSHARE_IMAGE:-qmind-akshare:v1.3.0}
     container_name: quantmind-akshare
     ports:
       - "127.0.0.1:9090:9090"
@@ -115,6 +118,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       network: host
+    image: ${QMIND_FRONTEND_IMAGE:-qmind-frontend:v1.3.0}
     container_name: quantmind-frontend
     ports:
       - "3004:80"

@@ -5,5 +5,8 @@ quantmind-server.exe
 *.db-wal
 *.db-shm
 *.log
+logs/
+.env
 tmp
 coverage
+quantmind
